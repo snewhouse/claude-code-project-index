@@ -32,3 +32,23 @@
 
 **Critical Correction:**
 Initial assumption was MCP servers go in `settings.json`. User challenged this. Web research of https://code.claude.com/docs/en/mcp confirmed: MCP servers stored in `~/.claude.json` (user/local scope) or `.mcp.json` (project scope). `settings.json` only controls permissions/allowlists.
+
+## 2026-03-17 Milestone 2 Completion: Hub Skill
+- Status: COMPLETE
+- Key outcome: `code-intelligence-index` skill created at `~/.claude/skills/code-intelligence-index/SKILL.md`
+- Artifacts: Hub skill with 5 sections (When to Use, Freshness Check, Query Guide, Fallback Matrix, Integration Patterns)
+- Decision: Kept skill under 120 lines — well within 300-line budget. Focus on patterns, not implementation detail.
+
+## 2026-03-17 Milestone 3 Completion: Deep Skill Integration
+- Status: COMPLETE
+- Key outcome: 4 skills/commands updated with index-enhanced sections
+- Artifacts: system-mapping (Points 1,2,4), impact-analysis (4/5 checks), ultraplan (Phase 1), codebase-deep-dive (Phase 2)
+- Decision: All modifications are additive "Index-enhanced" blocks placed BEFORE existing fallback sections. No original content removed.
+
+## 2026-03-17 Milestone 4 Completion: AA-MA Integration + Polish
+- Status: COMPLETE
+- Key outcome: AA-MA execution uses blast_radius advisory; ultraplan Phase 5 extracts structural facts; end-to-end verification passed
+- Artifacts: execute-aa-ma-milestone.md (blast_radius pre-check), ultraplan.md (reference.md guidance), design doc (deviations section)
+- Tests: 143 passing
+- Scope reductions: Post-write dead_code diff and milestone completion dead_code gate not implemented (low value-to-complexity ratio)
+- End-to-end verified: INDEX has 32 files, 126 graph edges, 50 symbol_importance entries; all CLI queries functional

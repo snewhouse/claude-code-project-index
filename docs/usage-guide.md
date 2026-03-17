@@ -458,7 +458,7 @@ python3 ~/.claude-code-project-index/scripts/mcp_server.py
 
 ### Configuring in Claude Code
 
-Add to `~/.claude/settings.json`:
+Add to `~/.claude/.mcp.json` (user-level MCP config):
 
 ```json
 {
@@ -472,6 +472,8 @@ Add to `~/.claude/settings.json`:
   }
 }
 ```
+
+> **Note:** MCP servers are configured in `.mcp.json` files, **not** in `settings.json`. Place the file at `~/.claude/.mcp.json` for user-level (all projects) or at your project root as `.mcp.json` for project-level configuration.
 
 ### Available MCP Tools
 

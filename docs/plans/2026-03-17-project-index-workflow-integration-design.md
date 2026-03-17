@@ -271,6 +271,18 @@ This bootstraps 80% of structural analysis. Use sg/Grep to fill gaps.
 
 ---
 
+## Implementation Deviations (2026-03-17)
+
+| Design Spec | Actual Implementation | Reason |
+|-------------|----------------------|--------|
+| Post-write dead_code diff during milestone execution | Not implemented | Low value-to-complexity ratio; dead code check is already available via CLI/MCP on demand |
+| On milestone completion: dead_code check + index regeneration | Not implemented | Stop hook already handles regeneration; dead code check as a mandatory gate would slow workflows |
+| `xg` (cross-file graph) populated | 0 edges in test index | Cross-file resolution depends on import map quality; works for projects with explicit imports but this project's structure doesn't produce many cross-file edges |
+
+All deviations are scope reductions, not design changes. The core architecture (3 access paths, hub skill, fallback matrix, SessionStart rule) was implemented as designed.
+
+---
+
 ## Sources
 
 - [Claude Code MCP Documentation](https://code.claude.com/docs/en/mcp)

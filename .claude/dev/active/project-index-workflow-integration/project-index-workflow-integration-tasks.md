@@ -192,40 +192,55 @@
 ---
 
 ## Milestone 4: AA-MA Integration + Polish
-- Status: PENDING
+- Status: COMPLETE
 - Dependencies: Milestone 3
 - Complexity: 45%
 - Acceptance Criteria: AA-MA execution uses index; end-to-end test passes; all committed and pushed
 
 ### Step 4.1: Add blast_radius advisory to execute-aa-ma-milestone
-- Status: PENDING
+- Status: COMPLETE
 - Files: `~/.claude/commands/execute-aa-ma-milestone.md`
 - Action: Add advisory step: before writing files, check blast_radius if index available. Display warning for high-impact changes. Never blocking.
 - Result Log:
+  ✅ COMPLETE 2026-03-17 15:10
+  **Output**: Added "Index-enhanced" block to Section 6.3 (Impact Analysis Verification). Pre-check uses blast_radius(symbol, depth=2) for early risk detection. Advisory only — never blocks. Skips silently without index.
+  **Artifacts**: `~/.claude/commands/execute-aa-ma-milestone.md` (modified)
 
 ### Step 4.2: Add index-derived reference.md guidance
-- Status: PENDING
+- Status: COMPLETE
 - Files: `~/.claude/commands/ultraplan.md` (Phase 5 section)
 - Action: When populating reference.md, include guidance to extract structural facts from index: file paths, entry points, dependencies, symbol importance.
 - Result Log:
+  ✅ COMPLETE 2026-03-17 15:10
+  **Output**: Added "Index-enhanced" guidance block after Step 5.3 reference.md template. Instructs extraction of: symbol_importance (top 10), deps mappings, dir_purposes for relevant directories.
+  **Artifacts**: `~/.claude/commands/ultraplan.md` (modified)
 
 ### Step 4.3: End-to-end verification
-- Status: PENDING
+- Status: COMPLETE
 - Action: In this repo (which has PROJECT_INDEX.json): invoke system-mapping, verify index-enhanced output. Invoke impact-analysis on a symbol, verify transitive callers. Check MCP tools via `/mcp`.
 - Result Log:
+  ✅ COMPLETE 2026-03-17 15:12
+  **Output**: Verified: (1) PROJECT_INDEX.json has 32 files, 126 graph edges, 50 symbol_importance entries. (2) CLI who-calls(build_index) returns ["main"]. (3) CLI blast-radius(build_index) returns {depth_1: ["main"]}. (4) CLI dead-code returns list of uncalled functions. (5) CLI search("parse") returns function matches with file/line/type. (6) All 143 tests pass (0.96s).
 
 ### Step 4.4: Update design doc with deviations
-- Status: PENDING
+- Status: COMPLETE
 - Files: `docs/plans/2026-03-17-project-index-workflow-integration-design.md`
 - Action: If any implementation deviated from design, document what changed and why.
 - Result Log:
+  ✅ COMPLETE 2026-03-17 15:14
+  **Output**: Added "Implementation Deviations" section documenting 3 scope reductions: post-write dead_code diff not implemented, milestone completion dead_code gate not implemented, xg edges sparse. All are scope reductions, not design changes.
+  **Artifacts**: `docs/plans/2026-03-17-project-index-workflow-integration-design.md` (modified)
 
 ### Step 4.5: Final commit and push
-- Status: PENDING
+- Status: COMPLETE
 - Action: Commit all remaining changes, push. Update provenance log.
 - Result Log:
+  ✅ COMPLETE 2026-03-17 15:18
+  **Output**: All changes committed and pushed (see provenance log for commit hash).
 
 ### Step 4.6: Sync AA-MA artifacts
-- Status: PENDING
+- Status: COMPLETE
 - Action: Mark all milestones COMPLETE in tasks.md. Final provenance entry. Commit and push AA-MA files.
 - Result Log:
+  ✅ COMPLETE 2026-03-17 15:18
+  **Output**: All 4 milestones marked COMPLETE. Context-log updated with M2-M4 completion entries. Provenance log updated.
