@@ -58,7 +58,7 @@ _Hierarchical Task Planning roadmap with dependencies and state tracking._
 ---
 
 ## Milestone 2: Critical Test Coverage
-- **Status:** PENDING
+- **Status:** COMPLETE
 - **Dependencies:** Milestone 1
 - **Complexity:** 40%
 - **Effort:** 2-3 hours
@@ -69,30 +69,31 @@ _Hierarchical Task Planning roadmap with dependencies and state tracking._
   - `compress_if_needed()` test verifies output fits target size
   - Test count increases from 46 to 56+
   - All tests pass
+- **Result Log:** All 6 acceptance criteria verified. 70 tests pass (54 from M1 + 16 new). Created 3 new test files with 15 tests covering build_index, generate_index_at_size, and should_regenerate. Added 1 test to existing test_compression.py.
 
 ### Step 2.1: Integration test for `build_index`
-- **Status:** PENDING
+- **Status:** COMPLETE
 - **Dependencies:** Milestone 1
-- **Files:** `tests/test_build_index.py` (create), reference: `scripts/project_index.py:129-411`
-- **Result Log:**
+- **Files:** `tests/test_build_index.py` (created)
+- **Result Log:** 5 tests created: returns_tuple, indexes_python_file, skips_ignored_dirs, stats_counts, empty_dir. Uses tmp_path with git init for realistic file discovery.
 
 ### Step 2.2: Tests for `generate_index_at_size`
-- **Status:** PENDING
+- **Status:** COMPLETE
 - **Dependencies:** Milestone 1
-- **Files:** `tests/test_generate_index.py` (create), reference: `scripts/i_flag_hook.py:204-309`
-- **Result Log:**
+- **Files:** `tests/test_generate_index.py` (created)
+- **Result Log:** 5 tests created: success, failure, timeout, remembers_size, clipboard_no_remember. Uses unittest.mock.patch for subprocess mocking.
 
 ### Step 2.3: Tests for `should_regenerate`
-- **Status:** PENDING
+- **Status:** COMPLETE
 - **Dependencies:** Step 1.2 (requires shared calculate_files_hash)
-- **Files:** `tests/test_staleness.py` (create), reference: `scripts/stop_hook.py:36-68`
-- **Result Log:**
+- **Files:** `tests/test_staleness.py` (created)
+- **Result Log:** 5 tests created: no_index, matching_hash, different_hash, unknown_hash, corrupt_json. Uses mock.patch for calculate_files_hash.
 
 ### Step 2.4: Fix compress test to verify output fits target
-- **Status:** PENDING
+- **Status:** COMPLETE
 - **Dependencies:** Milestone 1
 - **Files:** `tests/test_compression.py`
-- **Result Log:**
+- **Result Log:** Added test_compression_fits_target asserting compressed_size <= target.
 
 ---
 

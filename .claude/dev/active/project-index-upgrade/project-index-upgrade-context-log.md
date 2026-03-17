@@ -55,6 +55,13 @@ Seven research reports were analyzed from the `codebase-deep-dive-20260317-09493
 - Tests: 54 pass (46 original + 8 new)
 - Notable: The tightened basename regex `python\d*(\.\d+)?` is stricter than the original `startswith('python')` check, properly rejecting paths like `python3-malicious`
 
+## 2026-03-17 Milestone 2 Completion: Critical Test Coverage
+- Status: COMPLETE
+- Key outcome: Added 16 new tests across 4 test files covering build_index, generate_index_at_size, should_regenerate, and compress_if_needed target verification
+- Artifacts: Created tests/test_build_index.py (5 tests), tests/test_generate_index.py (5 tests), tests/test_staleness.py (5 tests). Updated tests/test_compression.py (+1 test).
+- Tests: 70 pass (54 from M1 + 16 new)
+- Notable: All 3 new test files were created by parallel subagents and passed on first run
+
 **Remaining Questions / Unresolved Issues:**
 
 - **PageRank convergence parameters:** The plan specifies 20 iterations for power iteration, but optimal parameters depend on actual graph density. Will need empirical tuning during M8 implementation.

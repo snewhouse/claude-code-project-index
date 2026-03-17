@@ -57,6 +57,23 @@ def test_compression_reduces_size():
     )
 
 
+def test_compression_fits_target():
+    """Compressed output fits within the target size."""
+    index = _make_large_dense_index()
+    original_size = _json_size(index)
+
+    # Set target to ~half the original size
+    target = original_size // 2
+    assert target > 0
+
+    compressed = compress_if_needed(index, target_size=target)
+    compressed_size = _json_size(compressed)
+
+    assert compressed_size <= target, (
+        f"Compressed size ({compressed_size}) exceeds target ({target})"
+    )
+
+
 def test_compression_idempotent():
     """When the index already fits within the target, it is returned unchanged."""
     small_index = {
