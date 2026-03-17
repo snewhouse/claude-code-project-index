@@ -55,6 +55,12 @@ Seven research reports were analyzed from the `codebase-deep-dive-20260317-09493
 - Tests: 54 pass (46 original + 8 new)
 - Notable: The tightened basename regex `python\d*(\.\d+)?` is stricter than the original `startswith('python')` check, properly rejecting paths like `python3-malicious`
 
+## 2026-03-17 Milestone 3 Completion: God Function Decomposition
+- Status: COMPLETE
+- Key outcome: Decomposed 5 god functions (381, 358, 283, 122, 111 lines) into 18 focused helpers. No function exceeds 100 lines. Pure refactoring — all tests pass unchanged.
+- Artifacts: Modified scripts/index_utils.py (major), scripts/project_index.py (major). Created tests/test_brace_matching.py (9 tests).
+- Tests: 79 pass (70 from M2 + 9 new)
+
 ## 2026-03-17 Milestone 2 Completion: Critical Test Coverage
 - Status: COMPLETE
 - Key outcome: Added 16 new tests across 4 test files covering build_index, generate_index_at_size, should_regenerate, and compress_if_needed target verification

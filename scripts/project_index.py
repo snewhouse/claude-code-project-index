@@ -127,6 +127,241 @@ def generate_tree_structure(root_path: Path, max_depth: int = MAX_TREE_DEPTH) ->
     return tree_lines
 
 
+def _discover_files(root: Path) -> Tuple[List[Path], int, Dict]:
+    """Discover files to index.
+
+    Uses git ls-files when available, falls back to manual file discovery.
+
+    Returns:
+        Tuple of (files_to_process, dir_count, directory_files).
+    """
+    from index_utils import get_git_files
+    git_files = get_git_files(root)
+    directory_files = {}
+
+    if git_files is not None:
+        print(f"   Using git ls-files (found {len(git_files)} files)")
+        files_to_process = git_files
+
+        # Count directories from git files
+        seen_dirs = set()
+        for file_path in git_files:
+            for parent in file_path.parents:
+                if parent != root and parent not in seen_dirs:
+                    seen_dirs.add(parent)
+                    if parent not in directory_files:
+                        directory_files[parent] = []
+        dir_count = len(seen_dirs)
+    else:
+        print("   Using manual file discovery (git not available)")
+        files_to_process = []
+        dir_count = 0
+        for file_path in root.rglob('*'):
+            if file_path.is_dir():
+                if not any(part in IGNORE_DIRS for part in file_path.parts):
+                    dir_count += 1
+                    directory_files[file_path] = []
+                continue
+            if file_path.is_file():
+                files_to_process.append(file_path)
+
+    return files_to_process, dir_count, directory_files
+
+
+def _parse_all_files(
+    files_to_process: List[Path], root: Path, index: Dict, directory_files: Dict
+) -> Tuple[int, int]:
+    """Parse all discovered files and populate the index.
+
+    Returns:
+        Tuple of (file_count, skipped_count).
+    """
+    file_count = 0
+    skipped_count = 0
+
+    for file_path in files_to_process:
+        if file_count >= MAX_FILES:
+            print(f"⚠️  Stopping at {MAX_FILES} files (project too large)")
+            print(f"   Consider adding more patterns to .gitignore to reduce scope")
+            print(f"   Or ask Claude to modify MAX_FILES in scripts/project_index.py")
+            break
+
+        if not should_index_file(file_path, root):
+            skipped_count += 1
+            continue
+
+        # Track files in their directories
+        parent_dir = file_path.parent
+        if parent_dir in directory_files:
+            directory_files[parent_dir].append(file_path.name)
+
+        # Get relative path and language
+        rel_path = file_path.relative_to(root)
+
+        # Handle markdown files specially
+        if file_path.suffix in MARKDOWN_EXTENSIONS:
+            doc_structure = extract_markdown_structure(file_path)
+            if doc_structure['sections'] or doc_structure['architecture_hints']:
+                index['documentation_map'][str(rel_path)] = doc_structure
+                index['stats']['markdown_files'] += 1
+            continue
+
+        # Handle code files
+        language = get_language_name(file_path.suffix)
+
+        file_info = {
+            'language': language,
+            'parsed': False
+        }
+
+        file_purpose = infer_file_purpose(file_path)
+        if file_purpose:
+            file_info['purpose'] = file_purpose
+
+        # Try to parse if we support this language
+        if file_path.suffix in PARSEABLE_LANGUAGES:
+            try:
+                content = file_path.read_text(encoding='utf-8', errors='ignore')
+                extracted = parse_file(content, file_path.suffix) or {'functions': {}, 'classes': {}}
+
+                if extracted['functions'] or extracted.get('classes', {}):
+                    file_info.update(extracted)
+                    file_info['parsed'] = True
+
+                lang_key = PARSEABLE_LANGUAGES[file_path.suffix]
+                index['stats']['fully_parsed'][lang_key] = \
+                    index['stats']['fully_parsed'].get(lang_key, 0) + 1
+
+            except Exception:
+                index['stats']['listed_only'][language] = \
+                    index['stats']['listed_only'].get(language, 0) + 1
+        else:
+            index['stats']['listed_only'][language] = \
+                index['stats']['listed_only'].get(language, 0) + 1
+
+        index['files'][str(rel_path)] = file_info
+        file_count += 1
+
+        if file_count % 100 == 0:
+            print(f"  Indexed {file_count} files...")
+
+    return file_count, skipped_count
+
+
+def _build_dep_graph(index: Dict) -> Dict:
+    """Build dependency graph from imports in the index.
+
+    Resolves relative imports to actual file paths where possible.
+
+    Returns:
+        Dependency graph dict mapping file paths to lists of dependencies.
+    """
+    dependency_graph = {}
+
+    for file_path, file_info in index['files'].items():
+        if file_info.get('imports'):
+            file_dir = Path(file_path).parent
+            dependencies = []
+
+            for imp in file_info['imports']:
+                if imp.startswith('.'):
+                    if imp.startswith('./'):
+                        resolved = str(file_dir / imp[2:])
+                    elif imp.startswith('../'):
+                        parts = imp.split('/')
+                        up_levels = len([p for p in parts if p == '..'])
+                        target_dir = file_dir
+                        for _ in range(up_levels):
+                            target_dir = target_dir.parent
+                        remaining = '/'.join(p for p in parts if p != '..')
+                        resolved = str(target_dir / remaining) if remaining else str(target_dir)
+                    else:
+                        resolved = str(file_dir)
+
+                    for ext in ['.py', '.js', '.ts', '.jsx', '.tsx', '']:
+                        potential_file = resolved + ext
+                        if potential_file in index['files'] or potential_file.replace('\\', '/') in index['files']:
+                            dependencies.append(potential_file.replace('\\', '/'))
+                            break
+                else:
+                    dependencies.append(imp)
+
+            if dependencies:
+                dependency_graph[file_path] = dependencies
+
+    return dependency_graph
+
+
+def _build_call_graph(index: Dict) -> None:
+    """Build bidirectional call graph and add called_by info to the index.
+
+    Modifies the index in-place, adding 'called_by' to functions and methods.
+    """
+    call_graph = {}
+    called_by_graph = {}
+
+    # Process all files to build call relationships
+    for file_path, file_info in index['files'].items():
+        if not isinstance(file_info, dict):
+            continue
+
+        if 'functions' in file_info:
+            for func_name, func_data in file_info['functions'].items():
+                if isinstance(func_data, dict) and 'calls' in func_data:
+                    full_func_name = f"{file_path}:{func_name}"
+                    call_graph[full_func_name] = func_data['calls']
+
+                    for called in func_data['calls']:
+                        if called not in called_by_graph:
+                            called_by_graph[called] = []
+                        called_by_graph[called].append(func_name)
+
+        if 'classes' in file_info:
+            for class_name, class_data in file_info['classes'].items():
+                if isinstance(class_data, dict) and 'methods' in class_data:
+                    for method_name, method_data in class_data['methods'].items():
+                        if isinstance(method_data, dict) and 'calls' in method_data:
+                            full_method_name = f"{file_path}:{class_name}.{method_name}"
+                            call_graph[full_method_name] = method_data['calls']
+
+                            for called in method_data['calls']:
+                                if called not in called_by_graph:
+                                    called_by_graph[called] = []
+                                called_by_graph[called].append(f"{class_name}.{method_name}")
+
+    # Add called_by information back to functions
+    for file_path, file_info in index['files'].items():
+        if not isinstance(file_info, dict):
+            continue
+
+        if 'functions' in file_info:
+            for func_name, func_data in file_info['functions'].items():
+                if func_name in called_by_graph:
+                    if isinstance(func_data, dict):
+                        func_data['called_by'] = called_by_graph[func_name]
+                    else:
+                        index['files'][file_path]['functions'][func_name] = {
+                            'signature': func_data,
+                            'called_by': called_by_graph[func_name]
+                        }
+
+        if 'classes' in file_info:
+            for class_name, class_data in file_info['classes'].items():
+                if isinstance(class_data, dict) and 'methods' in class_data:
+                    for method_name, method_data in class_data['methods'].items():
+                        full_name = f"{class_name}.{method_name}"
+                        if method_name in called_by_graph or full_name in called_by_graph:
+                            callers = called_by_graph.get(method_name, []) + called_by_graph.get(full_name, [])
+                            if callers:
+                                if isinstance(method_data, dict):
+                                    method_data['called_by'] = list(set(callers))
+                                else:
+                                    class_data['methods'][method_name] = {
+                                        'signature': method_data,
+                                        'called_by': list(set(callers))
+                                    }
+
+
 def build_index(root_dir: str) -> Tuple[Dict, int]:
     """Build the enhanced index with architectural awareness."""
     root = Path(root_dir)
@@ -150,267 +385,119 @@ def build_index(root_dir: str) -> Tuple[Dict, int]:
         'files': {},
         'dependency_graph': {}
     }
-    
+
     # Generate directory tree
     print("📊 Building directory tree...")
     index['project_structure']['tree'] = generate_tree_structure(root)
-    
-    file_count = 0
-    dir_count = 0
-    skipped_count = 0
-    directory_files = {}  # Track files per directory
-    
-    # Try to use git ls-files for better performance and accuracy
+
+    # Discover and parse files
     print("🔍 Indexing files...")
-    from index_utils import get_git_files
-    git_files = get_git_files(root)
-    
-    if git_files is not None:
-        # Use git-based file discovery
-        print(f"   Using git ls-files (found {len(git_files)} files)")
-        files_to_process = git_files
-        
-        # Count directories from git files
-        seen_dirs = set()
-        for file_path in git_files:
-            for parent in file_path.parents:
-                if parent != root and parent not in seen_dirs:
-                    seen_dirs.add(parent)
-                    if parent not in directory_files:
-                        directory_files[parent] = []
-        dir_count = len(seen_dirs)
-    else:
-        # Fallback to manual file discovery
-        print("   Using manual file discovery (git not available)")
-        files_to_process = []
-        for file_path in root.rglob('*'):
-            if file_path.is_dir():
-                # Track directories
-                if not any(part in IGNORE_DIRS for part in file_path.parts):
-                    dir_count += 1
-                    directory_files[file_path] = []
-                continue
-            
-            if file_path.is_file():
-                files_to_process.append(file_path)
-    
-    # Process files
-    for file_path in files_to_process:
-        if file_count >= MAX_FILES:
-            print(f"⚠️  Stopping at {MAX_FILES} files (project too large)")
-            print(f"   Consider adding more patterns to .gitignore to reduce scope")
-            print(f"   Or ask Claude to modify MAX_FILES in scripts/project_index.py")
-            break
-        
-        if not should_index_file(file_path, root):
-            skipped_count += 1
-            continue
-        
-        # Track files in their directories
-        parent_dir = file_path.parent
-        if parent_dir in directory_files:
-            directory_files[parent_dir].append(file_path.name)
-        
-        # Get relative path and language
-        rel_path = file_path.relative_to(root)
-        
-        # Handle markdown files specially
-        if file_path.suffix in MARKDOWN_EXTENSIONS:
-            doc_structure = extract_markdown_structure(file_path)
-            if doc_structure['sections'] or doc_structure['architecture_hints']:
-                index['documentation_map'][str(rel_path)] = doc_structure
-                index['stats']['markdown_files'] += 1
-            continue
-        
-        # Handle code files
-        language = get_language_name(file_path.suffix)
-        
-        # Base info for all files
-        file_info = {
-            'language': language,
-            'parsed': False
-        }
-        
-        # Add file purpose if we can infer it
-        file_purpose = infer_file_purpose(file_path)
-        if file_purpose:
-            file_info['purpose'] = file_purpose
-        
-        # Try to parse if we support this language
-        if file_path.suffix in PARSEABLE_LANGUAGES:
-            try:
-                content = file_path.read_text(encoding='utf-8', errors='ignore')
+    files_to_process, dir_count, directory_files = _discover_files(root)
+    file_count, skipped_count = _parse_all_files(files_to_process, root, index, directory_files)
 
-                # Dispatch to registered parser (or empty result if none)
-                extracted = parse_file(content, file_path.suffix) or {'functions': {}, 'classes': {}}
-
-                # Only add if we found something
-                if extracted['functions'] or extracted.get('classes', {}):
-                    file_info.update(extracted)
-                    file_info['parsed'] = True
-                    
-                # Update stats
-                lang_key = PARSEABLE_LANGUAGES[file_path.suffix]
-                index['stats']['fully_parsed'][lang_key] = \
-                    index['stats']['fully_parsed'].get(lang_key, 0) + 1
-                    
-            except Exception as e:
-                # Parse error - just list the file
-                index['stats']['listed_only'][language] = \
-                    index['stats']['listed_only'].get(language, 0) + 1
-        else:
-            # Language not supported for parsing
-            index['stats']['listed_only'][language] = \
-                index['stats']['listed_only'].get(language, 0) + 1
-        
-        # Add to index
-        index['files'][str(rel_path)] = file_info
-        file_count += 1
-        
-        # Progress indicator every 100 files
-        if file_count % 100 == 0:
-            print(f"  Indexed {file_count} files...")
-    
     # Infer directory purposes
     print("🏗️  Analyzing directory purposes...")
     for dir_path, files in directory_files.items():
-        if files:  # Only process directories with files
+        if files:
             purpose = infer_directory_purpose(dir_path, files)
             if purpose:
                 rel_dir = str(dir_path.relative_to(root))
                 if rel_dir != '.':
                     index['directory_purposes'][rel_dir] = purpose
-    
+
     index['stats']['total_files'] = file_count
     index['stats']['total_directories'] = dir_count
-    
+
     # Build dependency graph
     print("🔗 Building dependency graph...")
-    dependency_graph = {}
-    
-    for file_path, file_info in index['files'].items():
-        if file_info.get('imports'):
-            # Normalize imports to resolve relative paths
-            file_dir = Path(file_path).parent
-            dependencies = []
-            
-            for imp in file_info['imports']:
-                # Handle relative imports
-                if imp.startswith('.'):
-                    # Resolve relative import
-                    if imp.startswith('./'):
-                        # Same directory
-                        resolved = str(file_dir / imp[2:])
-                    elif imp.startswith('../'):
-                        # Parent directory
-                        parts = imp.split('/')
-                        up_levels = len([p for p in parts if p == '..'])
-                        target_dir = file_dir
-                        for _ in range(up_levels):
-                            target_dir = target_dir.parent
-                        remaining = '/'.join(p for p in parts if p != '..')
-                        resolved = str(target_dir / remaining) if remaining else str(target_dir)
-                    else:
-                        # Module import like from . import X
-                        resolved = str(file_dir)
-                    
-                    # Try to find actual file
-                    for ext in ['.py', '.js', '.ts', '.jsx', '.tsx', '']:
-                        potential_file = resolved + ext
-                        if potential_file in index['files'] or potential_file.replace('\\', '/') in index['files']:
-                            dependencies.append(potential_file.replace('\\', '/'))
-                            break
-                else:
-                    # External dependency or absolute import
-                    dependencies.append(imp)
-            
-            if dependencies:
-                dependency_graph[file_path] = dependencies
-    
-    # Only add if not empty
+    dependency_graph = _build_dep_graph(index)
     if dependency_graph:
         index['dependency_graph'] = dependency_graph
-    
+
     # Build bidirectional call graph
     print("📞 Building call graph...")
-    call_graph = {}
-    called_by_graph = {}
-    
-    # Process all files to build call relationships
-    for file_path, file_info in index['files'].items():
-        if not isinstance(file_info, dict):
-            continue
-            
-        # Process functions in this file
-        if 'functions' in file_info:
-            for func_name, func_data in file_info['functions'].items():
-                if isinstance(func_data, dict) and 'calls' in func_data:
-                    # Track what this function calls
-                    full_func_name = f"{file_path}:{func_name}"
-                    call_graph[full_func_name] = func_data['calls']
-                    
-                    # Build reverse index (called_by)
-                    for called in func_data['calls']:
-                        if called not in called_by_graph:
-                            called_by_graph[called] = []
-                        called_by_graph[called].append(func_name)
-        
-        # Process methods in classes
-        if 'classes' in file_info:
-            for class_name, class_data in file_info['classes'].items():
-                if isinstance(class_data, dict) and 'methods' in class_data:
-                    for method_name, method_data in class_data['methods'].items():
-                        if isinstance(method_data, dict) and 'calls' in method_data:
-                            # Track what this method calls
-                            full_method_name = f"{file_path}:{class_name}.{method_name}"
-                            call_graph[full_method_name] = method_data['calls']
-                            
-                            # Build reverse index
-                            for called in method_data['calls']:
-                                if called not in called_by_graph:
-                                    called_by_graph[called] = []
-                                called_by_graph[called].append(f"{class_name}.{method_name}")
-    
-    # Add called_by information back to functions
-    for file_path, file_info in index['files'].items():
-        if not isinstance(file_info, dict):
-            continue
-            
-        if 'functions' in file_info:
-            for func_name, func_data in file_info['functions'].items():
-                if func_name in called_by_graph:
-                    if isinstance(func_data, dict):
-                        func_data['called_by'] = called_by_graph[func_name]
-                    else:
-                        # Convert string signature to dict
-                        index['files'][file_path]['functions'][func_name] = {
-                            'signature': func_data,
-                            'called_by': called_by_graph[func_name]
-                        }
-        
-        if 'classes' in file_info:
-            for class_name, class_data in file_info['classes'].items():
-                if isinstance(class_data, dict) and 'methods' in class_data:
-                    for method_name, method_data in class_data['methods'].items():
-                        full_name = f"{class_name}.{method_name}"
-                        if method_name in called_by_graph or full_name in called_by_graph:
-                            callers = called_by_graph.get(method_name, []) + called_by_graph.get(full_name, [])
-                            if callers:
-                                if isinstance(method_data, dict):
-                                    method_data['called_by'] = list(set(callers))
-                                else:
-                                    # Convert string signature to dict
-                                    class_data['methods'][method_name] = {
-                                        'signature': method_data,
-                                        'called_by': list(set(callers))
-                                    }
-    
+    _build_call_graph(index)
+
     # Add staleness check
     week_old = datetime.now().timestamp() - 7 * 24 * 60 * 60
     index['staleness_check'] = week_old
-    
+
     return index, skipped_count
 
+
+
+def _truncate_doc(doc: str, max_len: int = 80) -> str:
+    """Truncate docstring to max length."""
+    if not doc:
+        return ''
+    doc = doc.strip().replace('\n', ' ')
+    if len(doc) > max_len:
+        return doc[:max_len-3] + '...'
+    return doc
+
+
+def _compress_file_entry(info: Dict) -> Optional[list]:
+    """Compress a single file's info into dense format entry.
+
+    Returns a list entry [lang_letter, funcs?, classes?] or None if no content.
+    """
+    file_entry = [LANG_LETTERS.get(info.get('language', 'unknown'), 'u')]
+
+    funcs = []
+    for fname, fdata in info.get('functions', {}).items():
+        if isinstance(fdata, dict):
+            sig = fdata.get('signature', '()').replace(' -> ', '>').replace(': ', ':')
+            calls = ','.join(fdata.get('calls', []))
+            doc = _truncate_doc(fdata.get('doc', ''))
+            funcs.append(f"{fname}:{fdata.get('line', 0)}:{sig}:{calls}:{doc}")
+        else:
+            funcs.append(f"{fname}:0:{fdata}::")
+    if funcs:
+        file_entry.append(funcs)
+
+    classes = {}
+    for cname, cdata in info.get('classes', {}).items():
+        if isinstance(cdata, dict):
+            class_line = str(cdata.get('line', 0))
+            methods = []
+            for mname, mdata in cdata.get('methods', {}).items():
+                if isinstance(mdata, dict):
+                    msig = mdata.get('signature', '()').replace(' -> ', '>').replace(': ', ':')
+                    mcalls = ','.join(mdata.get('calls', []))
+                    mdoc = _truncate_doc(mdata.get('doc', ''))
+                    methods.append(f"{mname}:{mdata.get('line', 0)}:{msig}:{mcalls}:{mdoc}")
+                else:
+                    methods.append(f"{mname}:0:{mdata}::")
+            if methods or class_line != '0':
+                classes[cname] = [class_line, methods]
+    if classes:
+        file_entry.append(classes)
+
+    return file_entry if len(file_entry) > 1 else None
+
+
+def _build_dense_call_graph_edges(index: Dict) -> list:
+    """Build call graph edges from parsed files for dense format."""
+    edges = set()
+    for path, info in index.get('files', {}).items():
+        if not info.get('parsed', False):
+            continue
+        for fname, fdata in info.get('functions', {}).items():
+            if isinstance(fdata, dict):
+                for called in fdata.get('calls', []):
+                    edges.add((fname, called))
+                for caller in fdata.get('called_by', []):
+                    edges.add((caller, fname))
+        for cname, cdata in info.get('classes', {}).items():
+            if isinstance(cdata, dict):
+                for mname, mdata in cdata.get('methods', {}).items():
+                    if isinstance(mdata, dict):
+                        full_name = f"{cname}.{mname}"
+                        for called in mdata.get('calls', []):
+                            edges.add((full_name, called))
+                        for caller in mdata.get('called_by', []):
+                            edges.add((caller, full_name))
+    return [[e[0], e[1]] for e in edges]
 
 
 def convert_to_enhanced_dense_format(index: Dict) -> Dict:
@@ -418,122 +505,37 @@ def convert_to_enhanced_dense_format(index: Dict) -> Dict:
     dense = {
         KEY_TIMESTAMP: index.get('indexed_at', ''),
         KEY_ROOT: index.get('root', '.'),
-        KEY_TREE: index.get('project_structure', {}).get('tree', [])[:20],  # Compact tree
+        KEY_TREE: index.get('project_structure', {}).get('tree', [])[:20],
         KEY_STATS: index.get('stats', {}),
-        KEY_FILES: {},     # Files
-        KEY_GRAPH: [],     # Call graph edges
-        KEY_DOCS: {},      # Documentation map
-        KEY_DEPS: index.get('dependency_graph', {}),  # Keep dependencies
+        KEY_FILES: {},
+        KEY_GRAPH: [],
+        KEY_DOCS: {},
+        KEY_DEPS: index.get('dependency_graph', {}),
     }
-    
-    def truncate_doc(doc: str, max_len: int = 80) -> str:
-        """Truncate docstring to max length."""
-        if not doc:
-            return ''
-        doc = doc.strip().replace('\n', ' ')
-        if len(doc) > max_len:
-            return doc[:max_len-3] + '...'
-        return doc
-    
+
     # Build compressed files section
     for path, info in index.get('files', {}).items():
         if not info.get('parsed', False):
             continue
-            
-        # Use abbreviated path
         abbrev_path = path.replace('scripts/', 's/').replace('src/', 'sr/').replace('tests/', 't/')
-        
-        file_entry = []
-        
-        # Add language as single letter
-        lang = info.get('language', 'unknown')
-        file_entry.append(LANG_LETTERS.get(lang, 'u'))
-        
-        # Compress functions with docstrings: name:line:signature:calls:docstring
-        funcs = []
-        for fname, fdata in info.get('functions', {}).items():
-            if isinstance(fdata, dict):
-                line = fdata.get('line', 0)
-                sig = fdata.get('signature', '()')
-                # Compress signature
-                sig = sig.replace(' -> ', '>').replace(': ', ':')
-                calls = ','.join(fdata.get('calls', []))
-                doc = truncate_doc(fdata.get('doc', ''))
-                funcs.append(f"{fname}:{line}:{sig}:{calls}:{doc}")
-            else:
-                funcs.append(f"{fname}:0:{fdata}::")
-        
-        if funcs:
-            file_entry.append(funcs)
-        
-        # Compress classes with methods and docstrings
-        classes = {}
-        for cname, cdata in info.get('classes', {}).items():
-            if isinstance(cdata, dict):
-                class_line = str(cdata.get('line', 0))
-                methods = []
-                for mname, mdata in cdata.get('methods', {}).items():
-                    if isinstance(mdata, dict):
-                        mline = mdata.get('line', 0)
-                        msig = mdata.get('signature', '()')
-                        msig = msig.replace(' -> ', '>').replace(': ', ':')
-                        mcalls = ','.join(mdata.get('calls', []))
-                        mdoc = truncate_doc(mdata.get('doc', ''))
-                        methods.append(f"{mname}:{mline}:{msig}:{mcalls}:{mdoc}")
-                    else:
-                        methods.append(f"{mname}:0:{mdata}::")
-                
-                if methods or class_line != '0':
-                    classes[cname] = [class_line, methods]
-        
-        if classes:
-            file_entry.append(classes)
-        
-        # Only add file if it has content
-        if len(file_entry) > 1:
-            dense[KEY_FILES][abbrev_path] = file_entry
+        entry = _compress_file_entry(info)
+        if entry:
+            dense[KEY_FILES][abbrev_path] = entry
 
-    # Build call graph edges (keep bidirectional info)
-    edges = set()
-    for path, info in index.get('files', {}).items():
-        if info.get('parsed', False):
-            # Extract function calls
-            for fname, fdata in info.get('functions', {}).items():
-                if isinstance(fdata, dict):
-                    for called in fdata.get('calls', []):
-                        edges.add((fname, called))
-                    for caller in fdata.get('called_by', []):
-                        edges.add((caller, fname))
-
-            # Extract method calls
-            for cname, cdata in info.get('classes', {}).items():
-                if isinstance(cdata, dict):
-                    for mname, mdata in cdata.get('methods', {}).items():
-                        if isinstance(mdata, dict):
-                            full_name = f"{cname}.{mname}"
-                            for called in mdata.get('calls', []):
-                                edges.add((full_name, called))
-                            for caller in mdata.get('called_by', []):
-                                edges.add((caller, full_name))
-
-    # Convert edges to list format
-    dense[KEY_GRAPH] = [[e[0], e[1]] for e in edges]
+    # Build call graph edges
+    dense[KEY_GRAPH] = _build_dense_call_graph_edges(index)
 
     # Add compressed documentation map
     for doc_path, doc_info in index.get('documentation_map', {}).items():
         sections = doc_info.get('sections', [])
         if sections:
-            # Keep first 10 sections for better context
             dense[KEY_DOCS][doc_path] = sections[:10]
 
-    # Add directory purposes if present
     if 'directory_purposes' in index:
         dense[KEY_DIR_PURPOSES] = index['directory_purposes']
-
-    # Add staleness check timestamp
     if 'staleness_check' in index:
         dense[KEY_STALENESS] = index['staleness_check']
-    
+
     return dense
 
 

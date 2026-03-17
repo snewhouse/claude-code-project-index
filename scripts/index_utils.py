@@ -239,351 +239,401 @@ def extract_function_calls_javascript(body: str, all_functions: Set[str]) -> Lis
 
 
 
-def extract_python_signatures(content: str) -> Dict[str, Dict]:
-    """Extract Python function and class signatures with full details for all files."""
-    result = {
-        'imports': [],
-        'functions': {},
-        'classes': {},
-        'constants': {},
-        'variables': [],
-        'type_aliases': {},
-        'enums': {},
-    }
-    
-    # Split into lines for line-by-line analysis
-    lines = content.split('\n')
-    
-    # Track current class context
-    current_class = None
-    current_class_indent = -1
-    class_stack = []  # For nested classes
-    
-    # First pass: collect all function and method names for call detection
-    all_function_names = set()
-    for line in lines:
-        func_match = re.match(r'^(?:[ \t]*)(async\s+)?def\s+(\w+)\s*\(', line)
-        if func_match:
-            all_function_names.add(func_match.group(2))
-    
-    # Patterns
-    class_pattern = r'^([ \t]*)class\s+(\w+)(?:\s*\((.*?)\))?:'
-    func_pattern = r'^([ \t]*)(async\s+)?def\s+(\w+)\s*\((.*?)\)(?:\s*->\s*([^:]+))?:'
-    property_pattern = r'^([ \t]*)(\w+)\s*:\s*([^=\n]+)'
-    # Module-level constants (UPPERCASE_NAME = value)
-    module_const_pattern = r'^([A-Z_][A-Z0-9_]*)\s*=\s*(.+)$'
-    # Module-level variables with type annotations
-    module_var_pattern = r'^(\w+)\s*:\s*([^=]+)\s*='
-    # Class-level constants
-    class_const_pattern = r'^([ \t]+)([A-Z_][A-Z0-9_]*)\s*=\s*(.+)$'
-    # Import patterns
+def _find_matching_brace(lines: List[str], start_line: int, start_col: int = 0) -> int:
+    """Find the line index of the matching closing brace.
+
+    Args:
+        lines: Source code lines
+        start_line: Line index where opening brace is (or where to start searching)
+        start_col: Column offset to start from on start_line
+
+    Returns:
+        Line index of the closing brace, or len(lines) - 1 if not found.
+    """
+    brace_count = 0
+    for i in range(start_line, len(lines)):
+        line = lines[i]
+        col_start = start_col if i == start_line else 0
+        for col in range(col_start, len(line)):
+            ch = line[col]
+            if ch == '{':
+                brace_count += 1
+            elif ch == '}':
+                brace_count -= 1
+                if brace_count == 0:
+                    return i
+    return len(lines) - 1
+
+
+def _find_matching_brace_char(text: str, start_pos: int, max_scan: int = 0) -> int:
+    """Find the position of the matching closing brace in a string.
+
+    Starts counting from start_pos (which should be just after the opening brace).
+    The opening brace itself should already be accounted for (brace_count starts at 1).
+
+    Args:
+        text: Source text to scan
+        start_pos: Position to start scanning (after the opening brace)
+        max_scan: Maximum number of characters to scan (0 = no limit)
+
+    Returns:
+        Position of the closing brace, or start_pos if not found.
+    """
+    brace_count = 1
+    end = min(len(text), start_pos + max_scan) if max_scan > 0 else len(text)
+    for i in range(start_pos, end):
+        if text[i] == '{':
+            brace_count += 1
+        elif text[i] == '}':
+            brace_count -= 1
+            if brace_count == 0:
+                return i
+    return start_pos
+
+
+def _infer_const_type(value: str) -> str:
+    """Infer the type category of a constant from its string value.
+
+    Returns one of: 'collection', 'str', 'number', 'value'.
+    """
+    if value.startswith(('{', '[')):
+        return 'collection'
+    if value.startswith(("'", '"', '`')):
+        return 'str'
+    if value.replace('.', '').replace('-', '').isdigit():
+        return 'number'
+    return 'value'
+
+
+def _parse_python_imports(lines: List[str]) -> List[str]:
+    """Extract import statements from Python source lines.
+
+    Parses both 'import X' and 'from X import Y' styles.
+
+    Returns:
+        List of imported module/package names.
+    """
     import_pattern = r'^(?:from\s+([^\s]+)\s+)?import\s+(.+)$'
-    # Type alias pattern
-    type_alias_pattern = r'^(\w+)\s*=\s*(?:Union|Optional|List|Dict|Tuple|Set|Type|Callable|Literal|TypeVar|NewType|TypedDict|Protocol)\[.+\]$'
-    # Decorator pattern
-    decorator_pattern = r'^([ \t]*)@(\w+)(?:\(.*\))?$'
-    # Docstring pattern (matches next line after function/class)
-    docstring_pattern = r'^([ \t]*)(?:\'\'\'|""")(.+?)(?:\'\'\'|""")'
-    
-    # Dunder methods to skip (unless in critical files)
-    skip_dunder = {'__repr__', '__str__', '__hash__', '__eq__', '__ne__', 
-                   '__lt__', '__le__', '__gt__', '__ge__', '__bool__'}
-    
-    # First pass: Extract imports
+    imports = []
     for line in lines:
         import_match = re.match(import_pattern, line.strip())
         if import_match:
             module, items = import_match.groups()
             if module:
                 # from X import Y style
-                result['imports'].append(module)
+                imports.append(module)
             else:
                 # import X style
                 for item in items.split(','):
                     item = item.strip().split(' as ')[0]  # Remove aliases
-                    result['imports'].append(item)
-    
-    # Track decorators for next function/method
-    pending_decorators = []
-    
+                    imports.append(item)
+    return imports
+
+
+def _extract_python_func_body(
+    lines: List[str], start_idx: int, indent_level: int, all_function_names: Set[str],
+    docstring_pattern: str
+) -> Tuple[Optional[str], List[str], int]:
+    """Extract a Python function's docstring and calls from its body.
+
+    Scans lines after the def statement to collect the body based on indentation,
+    then extracts the docstring and function calls.
+
+    Args:
+        lines: All source lines
+        start_idx: Line index right after the def statement (the first body line)
+        indent_level: Indentation level of the def keyword
+        all_function_names: Set of known function names for call detection
+        docstring_pattern: Regex pattern for single-line docstrings
+
+    Returns:
+        Tuple of (docstring_or_None, calls_list, end_line_idx).
+    """
+    # Extract docstring from first body line
+    doc = None
+    if start_idx < len(lines):
+        doc_match = re.match(docstring_pattern, lines[start_idx])
+        if doc_match:
+            _, doc_content = doc_match.groups()
+            doc = doc_content.strip()
+
+    # Collect function body lines - everything indented more than the def line
+    func_body_lines = []
+    body_idx = start_idx
+    while body_idx < len(lines):
+        body_line = lines[body_idx]
+
+        # Skip empty lines
+        if not body_line.strip():
+            func_body_lines.append(body_line)
+            body_idx += 1
+            continue
+
+        # Check indentation to see if we're still in the function
+        line_indent = len(body_line) - len(body_line.lstrip())
+
+        # If we hit a line that's not indented more than the function def, we're done
+        if line_indent <= indent_level and body_line.strip():
+            break
+
+        func_body_lines.append(body_line)
+        body_idx += 1
+
+    # Extract calls from the body
+    calls = []
+    if func_body_lines:
+        func_body = '\n'.join(func_body_lines)
+        calls = extract_function_calls_python(func_body, all_function_names)
+
+    return doc, calls, body_idx
+
+
+def _handle_python_class_def(
+    class_match, i: int, lines: List[str], result: Dict,
+    pending_decorators: List[str], class_stack: List, docstring_pattern: str
+) -> Tuple[Optional[str], int]:
+    """Handle a Python class definition line.
+
+    Returns (current_class_name_or_None, class_indent) to update caller state.
+    """
+    indent, name, bases = class_match.groups()
+    indent_level = len(indent)
+
+    # Handle nested classes - pop from stack if dedented
+    while class_stack and indent_level <= class_stack[-1][1]:
+        class_stack.pop()
+
+    current_class = None
+    current_class_indent = -1
+
+    # Only process top-level classes for the index
+    if indent_level == 0:
+        class_info = {'methods': {}, 'class_constants': {}}
+
+        if pending_decorators:
+            class_info['decorators'] = pending_decorators.copy()
+            pending_decorators.clear()
+
+        if bases:
+            base_list = [b.strip() for b in bases.split(',') if b.strip()]
+            if base_list:
+                class_info['inherits'] = base_list
+                base_names_lower = [b.lower() for b in base_list]
+                if 'enum' in base_names_lower or any('enum' in b for b in base_names_lower):
+                    class_info['type'] = 'enum'
+                elif 'exception' in base_names_lower or 'error' in base_names_lower or any('exception' in b or 'error' in b for b in base_names_lower):
+                    class_info['type'] = 'exception'
+                elif 'abc' in base_names_lower or 'protocol' in base_names_lower:
+                    class_info['abstract'] = True
+
+        if i + 1 < len(lines):
+            doc_match = re.match(docstring_pattern, lines[i + 1])
+            if doc_match:
+                _, doc_content = doc_match.groups()
+                class_info['doc'] = doc_content.strip()
+
+        class_info['line'] = i + 1
+        result['classes'][name] = class_info
+        current_class = name
+        current_class_indent = indent_level
+
+    class_stack.append((name, indent_level))
+    return current_class, current_class_indent
+
+
+def _handle_python_func_def(
+    line: str, i: int, lines: List[str], result: Dict,
+    func_pattern: str, skip_dunder: Set[str], pending_decorators: List[str],
+    all_function_names: Set[str], docstring_pattern: str,
+    current_class: Optional[str], current_class_indent: int
+) -> int:
+    """Handle a Python function/method definition.
+
+    Returns the updated line index i.
+    """
+    func_start_match = re.match(r'^([ \t]*)(async\s+)?def\s+(\w+)\s*\(', line)
+    if not func_start_match:
+        return i
+
+    indent, is_async, name = func_start_match.groups()
+    indent_level = len(indent)
+
+    # Collect the full signature across multiple lines
+    full_sig = line.rstrip()
+    j = i
+    while j < len(lines) and not re.search(r'\).*:', lines[j]):
+        j += 1
+        if j < len(lines):
+            full_sig += ' ' + lines[j].strip()
+
+    if j >= len(lines):
+        return i
+
+    complete_match = re.match(func_pattern, full_sig)
+    if not complete_match:
+        return i
+
+    indent, is_async, name, params, return_type = complete_match.groups()
+    i = j
+
+    params = re.sub(r'\s+', ' ', params).strip()
+
+    if name in skip_dunder and name != '__init__':
+        return i
+
+    func_info = {'line': i + 1}
+    signature = f"({params})"
+    if return_type:
+        signature += f" -> {return_type.strip()}"
+    if is_async:
+        signature = "async " + signature
+
+    if pending_decorators:
+        func_info['decorators'] = pending_decorators.copy()
+        if 'abstractmethod' in pending_decorators and current_class:
+            result['classes'][current_class]['abstract'] = True
+        pending_decorators.clear()
+
+    func_indent = len(indent) if indent else 0
+    doc, calls, _ = _extract_python_func_body(
+        lines, i + 1, func_indent, all_function_names, docstring_pattern
+    )
+    if doc:
+        func_info['doc'] = doc
+    if calls:
+        func_info['calls'] = calls
+    func_info['signature'] = signature
+
+    if current_class and indent_level > current_class_indent:
+        result['classes'][current_class]['methods'][name] = func_info
+    elif indent_level == 0:
+        result['functions'][name] = func_info
+
+    return i
+
+
+# Compiled patterns used by extract_python_signatures
+_PY_PATTERNS = None
+
+
+def _get_py_patterns():
+    """Lazily compile and cache regex patterns for Python parsing."""
+    global _PY_PATTERNS
+    if _PY_PATTERNS is None:
+        _PY_PATTERNS = {
+            'class': r'^([ \t]*)class\s+(\w+)(?:\s*\((.*?)\))?:',
+            'func': r'^([ \t]*)(async\s+)?def\s+(\w+)\s*\((.*?)\)(?:\s*->\s*([^:]+))?:',
+            'property': r'^([ \t]*)(\w+)\s*:\s*([^=\n]+)',
+            'module_const': r'^([A-Z_][A-Z0-9_]*)\s*=\s*(.+)$',
+            'module_var': r'^(\w+)\s*:\s*([^=]+)\s*=',
+            'class_const': r'^([ \t]+)([A-Z_][A-Z0-9_]*)\s*=\s*(.+)$',
+            'type_alias': r'^(\w+)\s*=\s*(?:Union|Optional|List|Dict|Tuple|Set|Type|Callable|Literal|TypeVar|NewType|TypedDict|Protocol)\[.+\]$',
+            'decorator': r'^([ \t]*)@(\w+)(?:\(.*\))?$',
+            'docstring': r'^([ \t]*)(?:\'\'\'|""")(.+?)(?:\'\'\'|""")',
+            'enum_val': r'^([ \t]+)([A-Z_][A-Z0-9_]*)\s*(?:=\s*(.+))?$',
+        }
+    return _PY_PATTERNS
+
+
+def _parse_python_module_level(line: str, result: Dict, pat: Dict) -> bool:
+    """Handle module-level type aliases, constants, and typed variables. Returns True if handled."""
+    tam = re.match(pat['type_alias'], line)
+    if tam:
+        result['type_aliases'][tam.group(1)] = line.split('=', 1)[1].strip()
+        return True
+    cm = re.match(pat['module_const'], line)
+    if cm:
+        result['constants'][cm.group(1)] = _infer_const_type(cm.group(2).split('#')[0].strip())
+        return True
+    vm = re.match(pat['module_var'], line)
+    if vm and vm.group(1) not in result['variables'] and not vm.group(1).startswith('_'):
+        result['variables'].append(vm.group(1))
+        return True
+    return False
+
+
+def _parse_python_class_body(line: str, result: Dict, pat: Dict,
+                             current_class: str, current_class_indent: int) -> bool:
+    """Handle class-level enum values, constants, and properties. Returns True if handled."""
+    if result['classes'][current_class].get('type') == 'enum':
+        em = re.match(pat['enum_val'], line)
+        if em and len(em.group(1)) > current_class_indent:
+            result['classes'][current_class].setdefault('values', []).append(em.group(2))
+            return True
+    ccm = re.match(pat['class_const'], line)
+    if ccm and len(ccm.group(1)) > current_class_indent:
+        result['classes'][current_class]['class_constants'][ccm.group(2)] = _infer_const_type(ccm.group(3).split('#')[0].strip())
+        return True
+    pm = re.match(pat['property'], line)
+    if pm and len(pm.group(1)) > current_class_indent and not pm.group(2).startswith('_'):
+        result['classes'][current_class].setdefault('properties', []).append(pm.group(2))
+    return False
+
+
+_SKIP_DUNDER = {'__repr__', '__str__', '__hash__', '__eq__', '__ne__',
+                '__lt__', '__le__', '__gt__', '__ge__', '__bool__'}
+
+
+def extract_python_signatures(content: str) -> Dict[str, Dict]:
+    """Extract Python function and class signatures with full details for all files."""
+    result = {'imports': [], 'functions': {}, 'classes': {}, 'constants': {},
+              'variables': [], 'type_aliases': {}, 'enums': {}}
+    lines = content.split('\n')
+    pat = _get_py_patterns()
+
+    current_class = None
+    current_class_indent = -1
+    class_stack: List = []
+    all_function_names = {m.group(2) for line in lines
+                         for m in [re.match(r'^(?:[ \t]*)(async\s+)?def\s+(\w+)\s*\(', line)] if m}
+    result['imports'] = _parse_python_imports(lines)
+    pending_decorators: List[str] = []
+
     i = 0
     while i < len(lines):
         line = lines[i]
-        
-        # Skip comments and docstrings
-        if line.strip().startswith('#') or line.strip().startswith('"""') or line.strip().startswith("'''"):
+        stripped = line.strip()
+        if stripped.startswith('#') or stripped.startswith('"""') or stripped.startswith("'''"):
             i += 1
             continue
-        
-        # Check for decorators
-        decorator_match = re.match(decorator_pattern, line)
-        if decorator_match:
-            _, decorator_name = decorator_match.groups()
-            pending_decorators.append(decorator_name)
+        dec_match = re.match(pat['decorator'], line)
+        if dec_match:
+            pending_decorators.append(dec_match.group(2))
             i += 1
             continue
-        
-        # Check for module-level constants (before checking classes)
-        if not current_class:  # Only at module level
-            # Check for type aliases first
-            type_alias_match = re.match(type_alias_pattern, line)
-            if type_alias_match:
-                alias_name = type_alias_match.group(1)
-                result['type_aliases'][alias_name] = line.split('=', 1)[1].strip()
-                i += 1
-                continue
-            
-            const_match = re.match(module_const_pattern, line)
-            if const_match:
-                const_name, const_value = const_match.groups()
-                # Clean up the value (remove comments, strip quotes for readability)
-                const_value = const_value.split('#')[0].strip()
-                # Determine type from value
-                if const_value.startswith(('{', '[')):
-                    const_type = 'collection'
-                elif const_value.startswith(("'", '"')):
-                    const_type = 'str'
-                elif const_value.replace('.', '').replace('-', '').isdigit():
-                    const_type = 'number'
-                else:
-                    const_type = 'value'
-                result['constants'][const_name] = const_type
-                i += 1
-                continue
-            
-            # Check for module-level typed variables
-            var_match = re.match(module_var_pattern, line)
-            if var_match:
-                var_name, var_type = var_match.groups()
-                if var_name not in result['variables'] and not var_name.startswith('_'):
-                    result['variables'].append(var_name)
-                i += 1
-                continue
-        
-        # Check for class definition
-        class_match = re.match(class_pattern, line)
+        if not current_class and _parse_python_module_level(line, result, pat):
+            i += 1
+            continue
+        class_match = re.match(pat['class'], line)
         if class_match:
-            indent, name, bases = class_match.groups()
-            indent_level = len(indent)
-            
-            # Handle nested classes - pop from stack if dedented
-            while class_stack and indent_level <= class_stack[-1][1]:
-                class_stack.pop()
-            
-            # Only process top-level classes for the index
-            if indent_level == 0:
-                class_info = {'methods': {}, 'class_constants': {}}
-                
-                # Check for decorators on the class
-                if pending_decorators:
-                    class_info['decorators'] = pending_decorators.copy()
-                    pending_decorators.clear()
-                
-                # Add inheritance info and check special types
-                if bases:
-                    base_list = [b.strip() for b in bases.split(',') if b.strip()]
-                    if base_list:
-                        class_info['inherits'] = base_list
-                        
-                        # Check for special class types
-                        base_names_lower = [b.lower() for b in base_list]
-                        if 'enum' in base_names_lower or any('enum' in b for b in base_names_lower):
-                            class_info['type'] = 'enum'
-                            # We'll extract enum values later
-                        elif 'exception' in base_names_lower or 'error' in base_names_lower or any('exception' in b or 'error' in b for b in base_names_lower):
-                            class_info['type'] = 'exception'
-                        elif 'abc' in base_names_lower or 'protocol' in base_names_lower:
-                            class_info['abstract'] = True
-                
-                # Extract docstring
-                if i + 1 < len(lines):
-                    next_line = lines[i + 1].strip()
-                    doc_match = re.match(docstring_pattern, lines[i + 1])
-                    if doc_match:
-                        _, doc_content = doc_match.groups()
-                        class_info['doc'] = doc_content.strip()
-                
-                class_info['line'] = i + 1  # Store line number (1-based)
-                result['classes'][name] = class_info
-                current_class = name
-                current_class_indent = indent_level
-            
-            # Add to stack
-            class_stack.append((name, indent_level))
+            cls_name, cls_indent = _handle_python_class_def(
+                class_match, i, lines, result, pending_decorators, class_stack, pat['docstring'])
+            if cls_name is not None:
+                current_class, current_class_indent = cls_name, cls_indent
             i += 1
             continue
-        
-        # Check if we've left the current class (dedented to module level)
-        if current_class and line.strip() and len(line) - len(line.lstrip()) <= current_class_indent:
-            # Check if it's not just a blank line or comment
-            if not line.strip().startswith('#'):
-                current_class = None
-                current_class_indent = -1
-        
-        # Check for class-level constants or enum values
-        if current_class:
-            # For enums, capture all uppercase attributes as values
-            if result['classes'][current_class].get('type') == 'enum':
-                # Enum value pattern (NAME = value or just NAME)
-                enum_val_pattern = r'^([ \t]+)([A-Z_][A-Z0-9_]*)\s*(?:=\s*(.+))?$'
-                enum_match = re.match(enum_val_pattern, line)
-                if enum_match:
-                    indent, enum_name, enum_value = enum_match.groups()
-                    if len(indent) > current_class_indent:
-                        if 'values' not in result['classes'][current_class]:
-                            result['classes'][current_class]['values'] = []
-                        result['classes'][current_class]['values'].append(enum_name)
-                        i += 1
-                        continue
-            
-            class_const_match = re.match(class_const_pattern, line)
-            if class_const_match:
-                indent, const_name, const_value = class_const_match.groups()
-                if len(indent) > current_class_indent:
-                    # Clean up the value
-                    const_value = const_value.split('#')[0].strip()
-                    # Determine type
-                    if const_value.startswith(('{', '[')):
-                        const_type = 'collection'
-                    elif const_value.startswith(("'", '"')):
-                        const_type = 'str'
-                    elif const_value.replace('.', '').replace('-', '').isdigit():
-                        const_type = 'number'
-                    else:
-                        const_type = 'value'
-                    result['classes'][current_class]['class_constants'][const_name] = const_type
-                    i += 1
-                    continue
-        
-        # Check for function/method definition
-        # First check if this line starts a function definition
-        func_start_pattern = r'^([ \t]*)(async\s+)?def\s+(\w+)\s*\('
-        func_start_match = re.match(func_start_pattern, line)
-        
-        if func_start_match:
-            indent, is_async, name = func_start_match.groups()
-            indent_level = len(indent)
-            
-            # Collect the full signature across multiple lines
-            full_sig = line.rstrip()
-            j = i
-            
-            # Keep collecting lines until we find the colon that ends the signature
-            while j < len(lines) and not re.search(r'\).*:', lines[j]):
-                j += 1
-                if j < len(lines):
-                    full_sig += ' ' + lines[j].strip()
-            
-            # Make sure we have a complete signature
-            if j >= len(lines):
-                i += 1
-                continue
-                
-            # Now parse the complete signature
-            complete_match = re.match(func_pattern, full_sig)
-            if complete_match:
-                indent, is_async, name, params, return_type = complete_match.groups()
-                i = j  # Skip to the last line we processed
-            else:
-                # Failed to parse, skip this function
-                i += 1
-                continue
-            
-            # Clean params
-            params = re.sub(r'\s+', ' ', params).strip()
-            
-            # Skip certain dunder methods (except __init__)
-            if name in skip_dunder and name != '__init__':
-                i += 1
-                continue
-            
-            # Build function/method info
-            func_info = {
-                'line': i + 1  # Store line number (1-based)
-            }
-            
-            # Build full signature
-            signature = f"({params})"
-            if return_type:
-                signature += f" -> {return_type.strip()}"
-            if is_async:
-                signature = "async " + signature
-            
-            # Add decorators if any
-            if pending_decorators:
-                func_info['decorators'] = pending_decorators.copy()
-                # Check for abstractmethod
-                if 'abstractmethod' in pending_decorators:
-                    if current_class:
-                        result['classes'][current_class]['abstract'] = True
-                pending_decorators.clear()
-            
-            # Extract docstring
-            if i + 1 < len(lines):
-                doc_match = re.match(docstring_pattern, lines[i + 1])
-                if doc_match:
-                    _, doc_content = doc_match.groups()
-                    func_info['doc'] = doc_content.strip()
-            
-            # Extract function body to find calls
-            func_body_start = i + 1
-            func_body_lines = []
-            func_indent = len(indent) if indent else 0
-            
-            # Skip past any docstring (but include it in body for now)
-            body_idx = func_body_start
-            
-            # Collect function body - everything indented more than the def line
-            while body_idx < len(lines):
-                body_line = lines[body_idx]
-                
-                # Skip empty lines
-                if not body_line.strip():
-                    func_body_lines.append(body_line)
-                    body_idx += 1
-                    continue
-                
-                # Check indentation to see if we're still in the function
-                line_indent = len(body_line) - len(body_line.lstrip())
-                
-                # If we hit a line that's not indented more than the function def, we're done
-                if line_indent <= func_indent and body_line.strip():
-                    break
-                    
-                func_body_lines.append(body_line)
-                body_idx += 1
-            
-            # Extract calls from the body
-            if func_body_lines:
-                func_body = '\n'.join(func_body_lines)
-                calls = extract_function_calls_python(func_body, all_function_names)
-                if calls:
-                    func_info['calls'] = calls
-            
-            # Always store as dict to include line number
-            func_info['signature'] = signature
-            
-            # Determine where to place this function
-            if current_class and indent_level > current_class_indent:
-                # It's a method of the current class
-                result['classes'][current_class]['methods'][name] = func_info
-            elif indent_level == 0:
-                # It's a module-level function
-                result['functions'][name] = func_info
-        
-        # Check for class properties
-        if current_class:
-            prop_match = re.match(property_pattern, line)
-            if prop_match:
-                indent, prop_name, prop_type = prop_match.groups()
-                if len(indent) > current_class_indent and not prop_name.startswith('_'):
-                    if 'properties' not in result['classes'][current_class]:
-                        result['classes'][current_class]['properties'] = []
-                    result['classes'][current_class]['properties'].append(prop_name)
-        
+        if current_class and stripped and len(line) - len(line.lstrip()) <= current_class_indent:
+            if not stripped.startswith('#'):
+                current_class, current_class_indent = None, -1
+        if current_class and _parse_python_class_body(line, result, pat, current_class, current_class_indent):
+            i += 1
+            continue
+        if re.match(r'^([ \t]*)(async\s+)?def\s+(\w+)\s*\(', line):
+            i = _handle_python_func_def(line, i, lines, result, pat['func'], _SKIP_DUNDER,
+                                        pending_decorators, all_function_names, pat['docstring'],
+                                        current_class, current_class_indent)
         i += 1
-    
-    # Post-process - remove empty collections
+
+    _cleanup_python_result(result)
+    return result
+
+
+def _cleanup_python_result(result: Dict) -> None:
+    """Post-process Python extraction result: remove empties and relocate enums.
+
+    Modifies result dict in-place.
+    """
+    # Remove empty collections from classes
     for class_name, class_info in result['classes'].items():
         if 'properties' in class_info and not class_info['properties']:
             del class_info['properties']
@@ -593,7 +643,7 @@ def extract_python_signatures(content: str) -> Dict[str, Dict]:
             del class_info['decorators']
         if 'values' in class_info and not class_info['values']:
             del class_info['values']
-    
+
     # Remove empty module-level collections
     if not result['constants']:
         del result['constants']
@@ -605,7 +655,7 @@ def extract_python_signatures(content: str) -> Dict[str, Dict]:
         del result['enums']
     if not result['imports']:
         del result['imports']
-    
+
     # Move enum classes to enums section
     enums_to_move = {}
     for class_name, class_info in list(result['classes'].items()):
@@ -615,11 +665,256 @@ def extract_python_signatures(content: str) -> Dict[str, Dict]:
                 'doc': class_info.get('doc', '')
             }
             del result['classes'][class_name]
-    
+
     if enums_to_move:
         result['enums'] = enums_to_move
-    
-    return result
+
+
+def _parse_js_imports(content: str) -> List[str]:
+    """Extract import statements from JavaScript/TypeScript source.
+
+    Handles ES6 import syntax and CommonJS require() calls.
+
+    Returns:
+        List of imported module paths.
+    """
+    imports = []
+    # import X from 'Y', import {X} from 'Y', import * as X from 'Y'
+    import_pattern = r'import\s+(?:([^{}\s]+)|{([^}]+)}|\*\s+as\s+(\w+))\s+from\s+[\'"]([^\'"]+)[\'"]'
+    for match in re.finditer(import_pattern, content):
+        default_import, named_imports, namespace_import, module = match.groups()
+        if module:
+            imports.append(module)
+
+    # require() style imports
+    require_pattern = r'(?:const|let|var)\s+(?:{[^}]+}|\w+)\s*=\s*require\s*\([\'"]([^\'"]+)[\'"]\)'
+    for match in re.finditer(require_pattern, content):
+        imports.append(match.group(1))
+
+    return imports
+
+
+def _extract_js_function_body_calls(
+    text: str, func_match_end: int, all_function_names: Set[str], max_scan: int = 5000
+) -> List[str]:
+    """Extract function calls from a JS/TS function body.
+
+    Finds the opening brace after the match end, then uses _find_matching_brace_char
+    to locate the body, and extracts calls.
+
+    Args:
+        text: Source text containing the function
+        func_match_end: Position after the regex match for the function signature
+        all_function_names: Set of known function names for call detection
+        max_scan: Maximum characters to scan for the closing brace
+
+    Returns:
+        List of called function names, or empty list.
+    """
+    brace_pos = text.find('{', func_match_end)
+    if brace_pos == -1 or brace_pos - func_match_end >= 100:
+        return []
+
+    body_start = brace_pos + 1
+    body_end = _find_matching_brace_char(text, body_start, max_scan=max_scan)
+
+    if body_end > body_start:
+        func_body = text[body_start:body_end]
+        return extract_function_calls_javascript(func_body, all_function_names)
+    return []
+
+
+def _collect_js_function_names(content: str) -> Set[str]:
+    """Collect all function names from JS/TS content for call detection."""
+    names = set()
+    for match in re.finditer(r'(?:async\s+)?function\s+(\w+)', content):
+        names.add(match.group(1))
+    for match in re.finditer(r'(?:const|let|var)\s+(\w+)\s*=\s*(?:async\s+)?\(', content):
+        names.add(match.group(1))
+    for match in re.finditer(r'(\w+)\s*\([^)]*\)\s*{', content):
+        names.add(match.group(1))
+    return names
+
+
+def _parse_js_type_aliases(content: str) -> Dict[str, str]:
+    """Extract TypeScript type aliases from content."""
+    aliases = {}
+    pattern = r'(?:export\s+)?type\s+(\w+)\s*=\s*(.+?)(?:;[\s]*(?:(?:export\s+)?(?:type|const|let|var|function|class|interface|enum)\s+|\/\/|$))'
+    for match in re.finditer(pattern, content, re.MULTILINE | re.DOTALL):
+        alias_name, alias_type = match.groups()
+        clean_type = ' '.join(alias_type.strip().split())
+        if clean_type.startswith('{') and clean_type.count('{') > clean_type.count('}'):
+            start_pos = match.start(2)
+            brace_count = 0
+            end_pos = start_pos
+            for i, char in enumerate(content[start_pos:]):
+                if char == '{':
+                    brace_count += 1
+                elif char == '}':
+                    brace_count -= 1
+                    if brace_count == 0:
+                        end_pos = start_pos + i + 1
+                        break
+            if end_pos > start_pos:
+                clean_type = ' '.join(content[start_pos:end_pos].strip().split())
+        aliases[alias_name] = clean_type
+    return aliases
+
+
+def _parse_js_interfaces(content: str) -> Dict[str, Dict]:
+    """Extract TypeScript interfaces from content."""
+    interfaces = {}
+    pattern = r'(?:export\s+)?interface\s+(\w+)(?:\s+extends\s+([^{]+))?\s*{'
+    for match in re.finditer(pattern, content):
+        interface_name, extends = match.groups()
+        info = {}
+        if extends:
+            info['extends'] = [e.strip() for e in extends.split(',')]
+        jsdoc_match = re.search(r'/\*\*\s*\n?\s*\*?\s*([^@\n]+)', content[:match.start()])
+        if jsdoc_match:
+            info['doc'] = jsdoc_match.group(1).strip()
+        interfaces[interface_name] = info
+    return interfaces
+
+
+def _parse_js_enums(content: str) -> Dict[str, Dict]:
+    """Extract TypeScript enums from content."""
+    enums = {}
+    pattern = r'(?:export\s+)?enum\s+(\w+)\s*{'
+    for match in re.finditer(pattern, content):
+        enum_name = match.group(1)
+        start_pos = match.end()
+        end_pos = _find_matching_brace_char(content, start_pos)
+        enum_body = content[start_pos:end_pos]
+        values = re.findall(r'(\w+)\s*(?:=\s*[^,\n]+)?', enum_body)
+        enums[enum_name] = {'values': values}
+    return enums
+
+
+def _parse_js_constants_and_vars(content: str) -> Tuple[Dict[str, str], List[str]]:
+    """Extract module-level constants and variables from JS/TS content."""
+    constants = {}
+    variables = []
+    const_pattern = r'(?:export\s+)?const\s+([A-Z_][A-Z0-9_]*)\s*=\s*([^;]+)'
+    for match in re.finditer(const_pattern, content):
+        const_name, const_value = match.groups()
+        constants[const_name] = _infer_const_type(const_value.strip())
+    var_pattern = r'(?:export\s+)?(?:let|const)\s+([a-z]\w*)\s*(?::\s*\w+)?\s*='
+    for match in re.finditer(var_pattern, content):
+        var_name = match.group(1)
+        if var_name not in variables:
+            variables.append(var_name)
+    return constants, variables
+
+
+def _parse_js_classes(
+    content: str, pos_to_line, all_function_names: Set[str]
+) -> Tuple[Dict[str, Dict], Dict[str, Tuple[int, int]]]:
+    """Parse all JS/TS class declarations, methods, and static constants.
+
+    Returns:
+        Tuple of (classes dict, class_positions dict).
+    """
+    class_pattern = r'(?:export\s+)?class\s+(\w+)(?:\s+extends\s+(\w+))?'
+    class_positions = {}
+    classes = {}
+
+    for match in re.finditer(class_pattern, content):
+        class_name, extends = match.groups()
+        start_pos = match.start()
+        brace_count = 0
+        in_class = False
+        end_pos = start_pos
+        for i in range(match.end(), len(content)):
+            if content[i] == '{':
+                if not in_class:
+                    in_class = True
+                brace_count += 1
+            elif content[i] == '}':
+                brace_count -= 1
+                if brace_count == 0 and in_class:
+                    end_pos = i
+                    break
+        class_positions[class_name] = (start_pos, end_pos)
+        class_info = {'line': pos_to_line(start_pos), 'methods': {}, 'static_constants': {}}
+        if extends:
+            class_info['extends'] = extends
+            if extends.lower() in ['error', 'exception'] or 'error' in extends.lower():
+                class_info['type'] = 'exception'
+        jsdoc_match = re.search(r'/\*\*\s*\n?\s*\*?\s*([^@\n]+)', content[:start_pos])
+        if jsdoc_match:
+            class_info['doc'] = jsdoc_match.group(1).strip()
+        classes[class_name] = class_info
+
+    # Extract methods and static constants from each class
+    method_patterns = [
+        r'^\s*(async\s+)?(\w+)\s*\((.*?)\)\s*(?::\s*([^{]+))?\s*{',
+        r'^\s*(\w+)\s*=\s*(?:async\s+)?\(([^)]*)\)\s*(?::\s*([^=]+))?\s*=>',
+        r'^\s*(constructor)\s*\(([^)]*)\)\s*{',
+    ]
+    for class_name, (start, end) in class_positions.items():
+        class_content = content[start:end]
+        for pattern in method_patterns:
+            for match in re.finditer(pattern, class_content, re.MULTILINE):
+                if 'constructor' in pattern:
+                    method_name, params, return_type = '__init__', match.group(2), None
+                elif '=' in pattern:
+                    method_name, params, return_type = match.group(1), match.group(2), match.group(3)
+                else:
+                    method_name, params, return_type = match.group(2), match.group(3), match.group(4)
+                if method_name in ['get', 'set', 'if', 'for', 'while', 'switch', 'catch', 'try']:
+                    continue
+                method_info = {'line': pos_to_line(start + match.start())}
+                params = re.sub(r'\s+', ' ', params).strip()
+                signature = f"({params})"
+                if return_type:
+                    signature += f": {return_type.strip()}"
+                if 'async' in str(match.group(0)):
+                    signature = "async " + signature
+                calls = _extract_js_function_body_calls(class_content, match.end(), all_function_names, max_scan=3000)
+                if calls:
+                    method_info['calls'] = calls
+                method_info['signature'] = signature
+                classes[class_name]['methods'][method_name] = method_info
+        static_const_pattern = r'static\s+([A-Z_][A-Z0-9_]*)\s*=\s*([^;]+)'
+        for match in re.finditer(static_const_pattern, class_content):
+            const_name, const_value = match.groups()
+            classes[class_name]['static_constants'][const_name] = _infer_const_type(const_value.strip())
+
+    return classes, class_positions
+
+
+def _parse_js_standalone_functions(
+    content: str, class_positions: Dict[str, Tuple[int, int]],
+    pos_to_line, all_function_names: Set[str]
+) -> Dict[str, Any]:
+    """Parse standalone (non-class) JS/TS function declarations and arrow functions."""
+    functions = {}
+    func_patterns = [
+        r'(?:export\s+)?(?:async\s+)?function\s+(\w+)\s*(?:<[^>]+>)?\s*\(([^)]*)\)(?:\s*:\s*([^{]+))?',
+        r'(?:export\s+)?const\s+(\w+)\s*(?::\s*[^=]+)?\s*=\s*(?:async\s+)?\(([^)]*)\)\s*(?::\s*([^=]+))?\s*=>',
+    ]
+    for pattern in func_patterns:
+        for match in re.finditer(pattern, content):
+            func_name = match.group(1)
+            params = match.group(2) if match.lastindex >= 2 else ''
+            return_type = match.group(3) if match.lastindex >= 3 else None
+            func_pos = match.start()
+            inside_class = any(s <= func_pos <= e for _, (s, e) in class_positions.items())
+            if not inside_class:
+                func_info = {'line': pos_to_line(func_pos)}
+                params = re.sub(r'\s+', ' ', params).strip()
+                signature = f"({params})"
+                if return_type:
+                    signature += f": {return_type.strip()}"
+                if 'async' in match.group(0):
+                    signature = "async " + signature
+                calls = _extract_js_function_body_calls(content, match.end(), all_function_names, max_scan=5000)
+                if calls:
+                    func_info['calls'] = calls
+                func_info['signature'] = signature
+                functions[func_name] = func_info
+    return functions
 
 
 def extract_javascript_signatures(content: str) -> Dict[str, Any]:
@@ -634,338 +929,34 @@ def extract_javascript_signatures(content: str) -> Dict[str, Any]:
         'interfaces': {},
         'enums': {},
     }
-    
-    # Helper to convert character position to line number
+
     def pos_to_line(pos: int) -> int:
         return content[:pos].count('\n') + 1
-    
-    # First pass: collect all function names for call detection
-    all_function_names = set()
-    # Regular functions
-    for match in re.finditer(r'(?:async\s+)?function\s+(\w+)', content):
-        all_function_names.add(match.group(1))
-    # Arrow functions and const functions
-    for match in re.finditer(r'(?:const|let|var)\s+(\w+)\s*=\s*(?:async\s+)?\(', content):
-        all_function_names.add(match.group(1))
-    # Method names
-    for match in re.finditer(r'(\w+)\s*\([^)]*\)\s*{', content):
-        all_function_names.add(match.group(1))
-    
-    # Extract imports first
-    # import X from 'Y', import {X} from 'Y', import * as X from 'Y'
-    import_pattern = r'import\s+(?:([^{}\s]+)|{([^}]+)}|\*\s+as\s+(\w+))\s+from\s+[\'"]([^\'"]+)[\'"]'
-    for match in re.finditer(import_pattern, content):
-        default_import, named_imports, namespace_import, module = match.groups()
-        if module:
-            result['imports'].append(module)
-    
-    # require() style imports
-    require_pattern = r'(?:const|let|var)\s+(?:{[^}]+}|\w+)\s*=\s*require\s*\([\'"]([^\'"]+)[\'"]\)'
-    for match in re.finditer(require_pattern, content):
-        result['imports'].append(match.group(1))
-    
-    # Extract type aliases (TypeScript) - simpler approach with brace counting
-    type_alias_pattern = r'(?:export\s+)?type\s+(\w+)\s*=\s*(.+?)(?:;[\s]*(?:(?:export\s+)?(?:type|const|let|var|function|class|interface|enum)\s+|\/\/|$))'
-    
-    for match in re.finditer(type_alias_pattern, content, re.MULTILINE | re.DOTALL):
-        alias_name, alias_type = match.groups()
-        # Clean up the type definition
-        clean_type = ' '.join(alias_type.strip().split())
-        
-        # If it starts with { but seems incomplete, try to capture the full object
-        if clean_type.startswith('{') and clean_type.count('{') > clean_type.count('}'):
-            # Find the position after the = sign
-            start_pos = match.start(2)
-            brace_count = 0
-            end_pos = start_pos
-            
-            # Count braces to find the complete type
-            for i, char in enumerate(content[start_pos:]):
-                if char == '{':
-                    brace_count += 1
-                elif char == '}':
-                    brace_count -= 1
-                    if brace_count == 0:
-                        end_pos = start_pos + i + 1
-                        break
-            
-            if end_pos > start_pos:
-                complete_type = content[start_pos:end_pos].strip()
-                clean_type = ' '.join(complete_type.split())
-        
-        result['type_aliases'][alias_name] = clean_type
-    
-    # Extract interfaces (TypeScript)
-    interface_pattern = r'(?:export\s+)?interface\s+(\w+)(?:\s+extends\s+([^{]+))?\s*{'
-    for match in re.finditer(interface_pattern, content):
-        interface_name, extends = match.groups()
-        interface_info = {}
-        if extends:
-            interface_info['extends'] = [e.strip() for e in extends.split(',')]
-        # Extract first line of JSDoc if present
-        jsdoc_match = re.search(r'/\*\*\s*\n?\s*\*?\s*([^@\n]+)', content[:match.start()])
-        if jsdoc_match:
-            interface_info['doc'] = jsdoc_match.group(1).strip()
-        result['interfaces'][interface_name] = interface_info
-    
-    # Extract enums (TypeScript)
-    enum_pattern = r'(?:export\s+)?enum\s+(\w+)\s*{'
-    enum_matches = list(re.finditer(enum_pattern, content))
-    for match in enum_matches:
-        enum_name = match.group(1)
-        # Find enum values
-        start_pos = match.end()
-        brace_count = 1
-        end_pos = start_pos
-        for i in range(start_pos, len(content)):
-            if content[i] == '{':
-                brace_count += 1
-            elif content[i] == '}':
-                brace_count -= 1
-                if brace_count == 0:
-                    end_pos = i
-                    break
-        
-        enum_body = content[start_pos:end_pos]
-        # Extract enum values
-        value_pattern = r'(\w+)\s*(?:=\s*[^,\n]+)?'
-        values = re.findall(value_pattern, enum_body)
-        result['enums'][enum_name] = {'values': values}
-    
-    # Extract module-level constants and variables
-    # const CONSTANT_NAME = value
-    const_pattern = r'(?:export\s+)?const\s+([A-Z_][A-Z0-9_]*)\s*=\s*([^;]+)'
-    for match in re.finditer(const_pattern, content):
-        const_name, const_value = match.groups()
-        const_value = const_value.strip()
-        if const_value.startswith(('{', '[')):
-            const_type = 'collection'
-        elif const_value.startswith(("'", '"', '`')):
-            const_type = 'str'
-        elif const_value.replace('.', '').replace('-', '').isdigit():
-            const_type = 'number'
-        else:
-            const_type = 'value'
-        result['constants'][const_name] = const_type
-    
-    # let/const variables (not uppercase)
-    var_pattern = r'(?:export\s+)?(?:let|const)\s+([a-z]\w*)\s*(?::\s*\w+)?\s*='
-    for match in re.finditer(var_pattern, content):
-        var_name = match.group(1)
-        if var_name not in result['variables']:
-            result['variables'].append(var_name)
-    
-    # Find all classes first with their boundaries
-    class_pattern = r'(?:export\s+)?class\s+(\w+)(?:\s+extends\s+(\w+))?'
-    class_positions = {}  # {class_name: (start_pos, end_pos)}
-    
-    for match in re.finditer(class_pattern, content):
-        class_name, extends = match.groups()
-        start_pos = match.start()
-        
-        # Find the class body (between { and })
-        brace_count = 0
-        in_class = False
-        end_pos = start_pos
-        
-        for i in range(match.end(), len(content)):
-            if content[i] == '{':
-                if not in_class:
-                    in_class = True
-                brace_count += 1
-            elif content[i] == '}':
-                brace_count -= 1
-                if brace_count == 0 and in_class:
-                    end_pos = i
-                    break
-        
-        class_positions[class_name] = (start_pos, end_pos)
-        
-        # Initialize class info
-        class_info = {
-            'line': pos_to_line(start_pos),
-            'methods': {}, 
-            'static_constants': {}
-        }
-        if extends:
-            class_info['extends'] = extends
-            # Check for exception classes
-            if extends.lower() in ['error', 'exception'] or 'error' in extends.lower():
-                class_info['type'] = 'exception'
-        
-        # Extract JSDoc comment
-        jsdoc_match = re.search(r'/\*\*\s*\n?\s*\*?\s*([^@\n]+)', content[:start_pos])
-        if jsdoc_match:
-            class_info['doc'] = jsdoc_match.group(1).strip()
-        
-        result['classes'][class_name] = class_info
-    
-    # Extract methods from classes
-    method_patterns = [
-        # Regular methods: methodName(...) { or async methodName(...) {
-        r'^\s*(async\s+)?(\w+)\s*\((.*?)\)\s*(?::\s*([^{]+))?\s*{',
-        # Arrow function properties: methodName = (...) => {
-        r'^\s*(\w+)\s*=\s*(?:async\s+)?\(([^)]*)\)\s*(?::\s*([^=]+))?\s*=>',
-        # Constructor
-        r'^\s*(constructor)\s*\(([^)]*)\)\s*{'
-    ]
-    
-    for class_name, (start, end) in class_positions.items():
-        class_content = content[start:end]
-        
-        for pattern in method_patterns:
-            for match in re.finditer(pattern, class_content, re.MULTILINE):
-                # Extract method name and params based on pattern
-                if 'constructor' in pattern:
-                    method_name = '__init__'  # Convert to Python-style
-                    params = match.group(2)
-                    return_type = None
-                elif '=' in pattern:
-                    method_name = match.group(1)
-                    params = match.group(2)
-                    return_type = match.group(3)
-                else:
-                    is_async = match.group(1)
-                    method_name = match.group(2)
-                    params = match.group(3)
-                    return_type = match.group(4)
-                
-                # Skip getters/setters and keywords
-                if method_name in ['get', 'set', 'if', 'for', 'while', 'switch', 'catch', 'try']:
-                    continue
-                
-                method_info = {
-                    'line': pos_to_line(start + match.start())
-                }
-                
-                # Build full signature
-                params = re.sub(r'\s+', ' ', params).strip()
-                signature = f"({params})"
-                if return_type:
-                    signature += f": {return_type.strip()}"
-                if 'async' in str(match.group(0)):
-                    signature = "async " + signature
-                
-                # Try to extract method body for call analysis
-                method_start = match.end()
-                # Find the opening brace
-                brace_pos = class_content.find('{', method_start)
-                if brace_pos != -1 and brace_pos - method_start < 100:
-                    # Extract method body
-                    brace_count = 1
-                    body_start = brace_pos + 1
-                    body_end = body_start
-                    
-                    for i in range(body_start, min(len(class_content), body_start + 3000)):
-                        if class_content[i] == '{':
-                            brace_count += 1
-                        elif class_content[i] == '}':
-                            brace_count -= 1
-                            if brace_count == 0:
-                                body_end = i
-                                break
-                    
-                    if body_end > body_start:
-                        method_body = class_content[body_start:body_end]
-                        calls = extract_function_calls_javascript(method_body, all_function_names)
-                        if calls:
-                            method_info['calls'] = calls
-                
-                # Store method info
-                if method_info:
-                    method_info['signature'] = signature
-                    result['classes'][class_name]['methods'][method_name] = method_info
-                else:
-                    result['classes'][class_name]['methods'][method_name] = signature
-        
-        # Extract static constants in class
-        static_const_pattern = r'static\s+([A-Z_][A-Z0-9_]*)\s*=\s*([^;]+)'
-        for match in re.finditer(static_const_pattern, class_content):
-            const_name, const_value = match.groups()
-            const_value = const_value.strip()
-            if const_value.startswith(('{', '[')):
-                const_type = 'collection'
-            elif const_value.startswith(("'", '"', '`')):
-                const_type = 'str'
-            elif const_value.replace('.', '').replace('-', '').isdigit():
-                const_type = 'number'
-            else:
-                const_type = 'value'
-            result['classes'][class_name]['static_constants'][const_name] = const_type
-    
-    # Extract standalone functions (not inside classes)
-    func_patterns = [
-        # Function declarations
-        r'(?:export\s+)?(?:async\s+)?function\s+(\w+)\s*(?:<[^>]+>)?\s*\(([^)]*)\)(?:\s*:\s*([^{]+))?',
-        # Arrow functions assigned to const
-        r'(?:export\s+)?const\s+(\w+)\s*(?::\s*[^=]+)?\s*=\s*(?:async\s+)?\(([^)]*)\)\s*(?::\s*([^=]+))?\s*=>'
-    ]
-    
-    for pattern in func_patterns:
-        for match in re.finditer(pattern, content):
-            func_name = match.group(1)
-            params = match.group(2) if match.lastindex >= 2 else ''
-            return_type = match.group(3) if match.lastindex >= 3 else None
-            
-            # Check if this function is inside any class
-            func_pos = match.start()
-            inside_class = False
-            for class_name, (start, end) in class_positions.items():
-                if start <= func_pos <= end:
-                    inside_class = True
-                    break
-            
-            if not inside_class:
-                func_info = {
-                    'line': pos_to_line(func_pos)
-                }
-                
-                # Build full signature
-                params = re.sub(r'\s+', ' ', params).strip()
-                signature = f"({params})"
-                if return_type:
-                    signature += f": {return_type.strip()}"
-                if 'async' in match.group(0):
-                    signature = "async " + signature
-                
-                # Try to extract function body for call analysis
-                func_start = match.end()
-                # Find the opening brace
-                brace_pos = content.find('{', func_start)
-                if brace_pos != -1 and brace_pos - func_start < 100:  # Reasonable distance
-                    # Extract function body
-                    brace_count = 1
-                    body_start = brace_pos + 1
-                    body_end = body_start
-                    
-                    for i in range(body_start, min(len(content), body_start + 5000)):  # Limit scan
-                        if content[i] == '{':
-                            brace_count += 1
-                        elif content[i] == '}':
-                            brace_count -= 1
-                            if brace_count == 0:
-                                body_end = i
-                                break
-                    
-                    if body_end > body_start:
-                        func_body = content[body_start:body_end]
-                        calls = extract_function_calls_javascript(func_body, all_function_names)
-                        if calls:
-                            func_info['calls'] = calls
-                
-                # Store function info
-                if func_info:
-                    func_info['signature'] = signature
-                    result['functions'][func_name] = func_info
-                else:
-                    result['functions'][func_name] = signature
-    
-    # Clean up empty collections
+
+    all_function_names = _collect_js_function_names(content)
+    result['imports'] = _parse_js_imports(content)
+    result['type_aliases'] = _parse_js_type_aliases(content)
+    result['interfaces'] = _parse_js_interfaces(content)
+    result['enums'] = _parse_js_enums(content)
+    result['constants'], result['variables'] = _parse_js_constants_and_vars(content)
+    result['classes'], class_positions = _parse_js_classes(content, pos_to_line, all_function_names)
+    result['functions'] = _parse_js_standalone_functions(
+        content, class_positions, pos_to_line, all_function_names
+    )
+
+    _cleanup_js_result(result)
+    return result
+
+
+def _cleanup_js_result(result: Dict) -> None:
+    """Post-process JavaScript extraction result: remove empty collections.
+
+    Modifies result dict in-place.
+    """
     for class_name, class_info in result['classes'].items():
         if 'static_constants' in class_info and not class_info['static_constants']:
             del class_info['static_constants']
-    
-    # Remove empty module-level collections
+
     if not result['constants']:
         del result['constants']
     if not result['variables']:
@@ -978,8 +969,6 @@ def extract_javascript_signatures(content: str) -> Dict[str, Any]:
         del result['interfaces']
     if not result['enums']:
         del result['enums']
-    
-    return result
 
 
 def extract_function_calls_shell(body: str, all_functions: Set[str]) -> List[str]:
@@ -1075,63 +1064,60 @@ def _parse_shell_function(func_name: str, doc: Optional[str], lines: List[str], 
     return func_info
 
 
-def extract_shell_signatures(content: str) -> Dict[str, Any]:
-    """Extract shell script function signatures and structure."""
-    result = {
-        'functions': {},
-        'variables': [],
-        'exports': {},
-        'sources': [],
-    }
-    
-    lines = content.split('\n')
-    
-    # First pass: collect all function names
-    all_function_names = set()
+def _collect_shell_function_names(lines: List[str]) -> Set[str]:
+    """Collect all function names from shell script lines."""
+    names = set()
     for line in lines:
-        # Style 1: function_name() {
         match1 = re.match(r'^(\w+)\s*\(\)\s*\{?', line)
         if match1:
-            all_function_names.add(match1.group(1))
-        # Style 2: function function_name {
+            names.add(match1.group(1))
         match2 = re.match(r'^function\s+(\w+)\s*\{?', line)
         if match2:
-            all_function_names.add(match2.group(1))
-    
-    # Function patterns
-    # Style 1: function_name() { ... }
-    func_pattern1 = r'^(\w+)\s*\(\)\s*\{?'
-    # Style 2: function function_name { ... }
-    func_pattern2 = r'^function\s+(\w+)\s*\{?'
-    
-    # Variable patterns
-    # Export pattern: export VAR=value
-    export_pattern = r'^export\s+([A-Z_][A-Z0-9_]*)(=(.*))?'
-    # Regular variable: VAR=value (uppercase)
-    var_pattern = r'^([A-Z_][A-Z0-9_]*)=(.+)$'
-    
-    # Source patterns - handle quotes and command substitution
+            names.add(match2.group(1))
+    return names
+
+
+def _parse_shell_source_line(stripped: str, sources: List[str]) -> bool:
+    """Try to parse a source/dot include from a shell line. Returns True if matched."""
     source_patterns = [
-        r'^(?:source|\.)\s+([\'"])([^\'"]+)\1',  # Quoted paths
-        r'^(?:source|\.)\s+(\$\([^)]+\)[^\s]*)',  # Command substitution like $(dirname "$0")/file
-        r'^(?:source|\.)\s+([^\s]+)',  # Unquoted paths
+        r'^(?:source|\.)\s+([\'"])([^\'"]+)\1',
+        r'^(?:source|\.)\s+(\$\([^)]+\)[^\s]*)',
+        r'^(?:source|\.)\s+([^\s]+)',
     ]
-    
+    for pattern in source_patterns:
+        match = re.match(pattern, stripped)
+        if match:
+            sourced_file = match.group(2) if len(match.groups()) == 2 else match.group(1)
+            sourced_file = sourced_file.strip()
+            if sourced_file and sourced_file not in sources:
+                sources.append(sourced_file)
+            return True
+    return False
+
+
+def extract_shell_signatures(content: str) -> Dict[str, Any]:
+    """Extract shell script function signatures and structure."""
+    result = {'functions': {}, 'variables': [], 'exports': {}, 'sources': []}
+    lines = content.split('\n')
+    all_function_names = _collect_shell_function_names(lines)
+
+    func_pattern1 = r'^(\w+)\s*\(\)\s*\{?'
+    func_pattern2 = r'^function\s+(\w+)\s*\{?'
+    export_pattern = r'^export\s+([A-Z_][A-Z0-9_]*)(=(.*))?'
+    var_pattern = r'^([A-Z_][A-Z0-9_]*)=(.+)$'
+
     for i, line in enumerate(lines):
         stripped = line.strip()
-        
-        # Skip empty lines and pure comments
         if not stripped or stripped.startswith('#!'):
             continue
-            
-        # Check for function definition (style 1: name() { or style 2: function name {)
+
+        # Check for function definition
         match = re.match(func_pattern1, stripped) or re.match(func_pattern2, stripped)
         if match:
             func_name = match.group(1)
             doc = None
             if i > 0 and lines[i-1].strip().startswith('#'):
                 doc = lines[i-1].strip()[1:].strip()
-
             result['functions'][func_name] = _parse_shell_function(
                 func_name, doc, lines, i, all_function_names
             )
@@ -1143,7 +1129,6 @@ def extract_shell_signatures(content: str) -> Dict[str, Any]:
             var_name = match.group(1)
             var_value = match.group(3) if match.group(3) else None
             if var_value:
-                # Determine type
                 if var_value.startswith(("'", '"')):
                     var_type = 'str'
                 elif var_value.isdigit():
@@ -1152,31 +1137,18 @@ def extract_shell_signatures(content: str) -> Dict[str, Any]:
                     var_type = 'value'
                 result['exports'][var_name] = var_type
             continue
-        
+
         # Check for regular variables (uppercase)
         match = re.match(var_pattern, stripped)
         if match:
             var_name = match.group(1)
-            # Only track if not already in exports
             if var_name not in result['exports'] and var_name not in result['variables']:
                 result['variables'].append(var_name)
             continue
-        
+
         # Check for source/dot includes
-        for source_pattern in source_patterns:
-            match = re.match(source_pattern, stripped)
-            if match:
-                # Extract the file path based on which pattern matched
-                if len(match.groups()) == 2:  # Quoted pattern
-                    sourced_file = match.group(2)
-                else:  # Unquoted or command substitution
-                    sourced_file = match.group(1)
-                
-                sourced_file = sourced_file.strip()
-                if sourced_file and sourced_file not in result['sources']:
-                    result['sources'].append(sourced_file)
-                break  # Found a match, no need to try other patterns
-    
+        _parse_shell_source_line(stripped, result['sources'])
+
     # Clean up empty collections
     if not result['variables']:
         del result['variables']
@@ -1184,7 +1156,7 @@ def extract_shell_signatures(content: str) -> Dict[str, Any]:
         del result['exports']
     if not result['sources']:
         del result['sources']
-    
+
     return result
 
 
