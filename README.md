@@ -121,12 +121,27 @@ The tool remembers your last `-i` size per project and targets that amount, but 
 **File tracking** (listing only):
 - Go, Rust, Java, C/C++, Ruby, PHP, Swift, Kotlin, and 20+ more
 
+## Testing
+
+```bash
+# Run full test suite
+python3 -m pytest tests/ -v
+
+# Run a single test file
+python3 -m pytest tests/test_parsers.py -v
+
+# Run a single test
+python3 -m pytest tests/test_parsers.py::test_python_simple_function -v
+```
+
+The test suite covers: parser characterization (Python/JS/Shell), flag parsing, compression, security (no hardcoded IPs, validated executables), quality (no bare excepts, no dead code), clipboard transports, atomic writes, and parser registry dispatch.
+
 ## Installation Details
 
 - **Location**: `~/.claude-code-project-index/`
 - **Hooks configured**:
-  - `UserPromptSubmit`: Detects -i flag
-  - `Stop`: Refreshes index after session
+  - `UserPromptSubmit`: Detects -i flag, validates `.python_cmd`, injects context
+  - `Stop`: Smart refresh — checks staleness before regenerating, skips when index is fresh
 - **Commands**: `/index` for manual creation/update
 - **Agent**: `~/.claude/agents/index-analyzer.md` for deep analysis
 - **Python**: Automatically finds newest 3.8+ version
@@ -187,16 +202,20 @@ For any issue, just describe it to Claude and let it fix the tool for you!
 
 **Clipboard issues?**
 - Install pyperclip: `pip install pyperclip`
-- SSH users: Content saved to `.clipboard_content.txt`
-- For unlimited clipboard over SSH: [VM Bridge](https://github.com/ericbuess/vm-bridge)
+- SSH users: OSC 52 escape sequence used automatically; content also saved to temp file with restricted permissions
+- Local Linux: `xclip` used if available (install with `sudo apt install xclip`)
 
 ## Technical Details
 
-The index uses a compressed format to save ~50% space:
-- Minified JSON (single line) for file storage
-- Short keys: `f`→files, `g`→graph, `d`→docs, `deps`→dependencies
-- Compact function signatures with line numbers
-- Clipboard mode (`-ic`) uses readable formatting for external AI tools
+**Index format:** Compressed JSON with short keys defined as constants (`KEY_FILES='f'`, `KEY_GRAPH='g'`, `KEY_DOCS='d'`, `KEY_DEPS='deps'`). Function signatures use colon-delimited format: `name:line:signature:calls:docstring`.
+
+**Parser dispatch:** `PARSER_REGISTRY` dict in `index_utils.py` maps file extensions to parser functions. Adding a language: write `extract_X_signatures(content)`, register in `register_parsers()`.
+
+**Clipboard transport:** Strategy pattern via `CLIPBOARD_TRANSPORTS` and `SSH_TRANSPORTS` lists in `i_flag_hook.py`. Transports: `_try_osc52` (SSH), `_try_tmux_buffer` (SSH large), `_try_xclip` (local X11), `_try_pyperclip` (library), `_try_file_fallback` (always works).
+
+**File writes:** Atomic via `tempfile.mkstemp()` + `os.replace()`. Concurrent session safety via `fcntl.flock()` (Linux/WSL2).
+
+**Security:** `.python_cmd` validated before execution (`_validate_python_cmd()`). No hardcoded IPs or author-specific paths. All exception handlers use typed exceptions (no bare `except:`).
 
 ## Uninstall
 
