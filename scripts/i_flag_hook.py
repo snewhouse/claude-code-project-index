@@ -15,6 +15,12 @@ import time
 from pathlib import Path
 from datetime import datetime
 
+try:
+    import fcntl
+    HAS_FCNTL = True
+except ImportError:
+    HAS_FCNTL = False
+
 # Constants
 DEFAULT_SIZE_K = 50  # Default 50k tokens
 MIN_SIZE_K = 1       # Minimum 1k tokens
@@ -264,9 +270,27 @@ def generate_index_at_size(project_root, target_size_k, is_clipboard_mode=False)
                 
                 index['_meta'].update(metadata_update)
                 
-                # Save updated index
-                with open(index_path, 'w') as f:
-                    json.dump(index, f, indent=2)
+                # Atomic write with optional locking
+                index_data = json.dumps(index, indent=2).encode('utf-8')
+                tmp_fd, tmp_path = tempfile.mkstemp(
+                    dir=str(index_path.parent),
+                    suffix='.tmp',
+                    prefix='.PROJECT_INDEX_'
+                )
+                try:
+                    if HAS_FCNTL:
+                        fcntl.flock(tmp_fd, fcntl.LOCK_EX)
+                    os.write(tmp_fd, index_data)
+                    os.close(tmp_fd)
+                    os.replace(tmp_path, str(index_path))
+                except Exception:
+                    try:
+                        os.close(tmp_fd)
+                    except Exception:
+                        pass
+                    if os.path.exists(tmp_path):
+                        os.unlink(tmp_path)
+                    raise
                 
                 print(f"✅ Created PROJECT_INDEX.json ({actual_size_k}k actual, {target_size_k}k target)", file=sys.stderr)
                 return True
@@ -284,11 +308,7 @@ def generate_index_at_size(project_root, target_size_k, is_clipboard_mode=False)
         print(f"⚠️ Error creating index: {e}", file=sys.stderr)
         return False
 
-def copy_to_clipboard(prompt, index_path):
-    """Copy prompt, instructions, and index to clipboard for external AI."""
-    try:
-        # Create clipboard-specific instructions (no tools, no subagent references)
-        clipboard_instructions = """You are analyzing a codebase index to help identify relevant files and code sections.
+_CLIPBOARD_INSTRUCTIONS = """You are analyzing a codebase index to help identify relevant files and code sections.
 
 ## YOUR TASK
 Analyze the PROJECT_INDEX.json below to identify the most relevant code sections for the user's request.
@@ -326,190 +346,186 @@ Your response will be copied and pasted to Claude Code. Format your response as:
 
 Do NOT include the original user prompt in your response.
 Focus on providing actionable file locations and insights."""
-        
-        # Load index
-        with open(index_path, 'r') as f:
-            index = json.load(f)
-        
-        # Build clipboard content
-        clipboard_content = f"""# Codebase Analysis Request
 
-## Task for You
-{prompt}
 
-## Instructions
-{clipboard_instructions}
+def _build_clipboard_content(prompt, index_path):
+    """Build the full clipboard string: instructions + index."""
+    with open(index_path, 'r') as f:
+        index = json.load(f)
+    return (
+        f"# Codebase Analysis Request\n\n"
+        f"## Task for You\n{prompt}\n\n"
+        f"## Instructions\n{_CLIPBOARD_INSTRUCTIONS}\n\n"
+        f"## PROJECT_INDEX.json\n{json.dumps(index, indent=2)}\n"
+    )
 
-## PROJECT_INDEX.json
-{json.dumps(index, indent=2)}
-"""
-        
-        # Try to copy to clipboard
-        clipboard_success = False
 
-        # Check if we're in an SSH session (clipboard won't work across SSH)
-        is_ssh = os.environ.get('SSH_CONNECTION') or os.environ.get('SSH_CLIENT')
-        
-        # For SSH sessions, try OSC 52 or other methods
-        if is_ssh:
-            fd, fallback_path_str = tempfile.mkstemp(
-                prefix='.clipboard_content_', suffix='.txt', dir=str(Path.cwd())
-            )
-            try:
-                os.write(fd, clipboard_content.encode('utf-8'))
-                os.fchmod(fd, 0o600)
-            finally:
-                os.close(fd)
-            fallback_path = Path(fallback_path_str)
-            
-            # Import base64 at the beginning for all methods
-            import base64
-            
-            # Try multiple clipboard methods for SSH sessions
-            clipboard_success = False
-            
-            # Check content size first - OSC 52 has limits, especially over mosh
-            content_size = len(clipboard_content)
-            # Testing shows mosh/tmux cuts off at ~12KB, so stay safely under that
-            mosh_limit = 11000  # Just under the 12KB cutoff we observed
-            
-            if content_size <= mosh_limit:
-                # Small enough for OSC 52 - try to send directly to clipboard
-                try:
-                    # Base64 encode and remove newlines
-                    b64_content = base64.b64encode(clipboard_content.encode('utf-8')).decode('ascii')
-                    
-                    # Get the correct TTY device
-                    tty_device = None
-                    is_tmux = os.environ.get('TMUX')
-                    
-                    if is_tmux:
-                        # Inside tmux: get the client tty
-                        try:
-                            result = subprocess.run(['tmux', 'display-message', '-p', '#{client_tty}'],
-                                                  capture_output=True, text=True, check=True)
-                            tty_device = result.stdout.strip()
-                        except (subprocess.SubprocessError, OSError):
-                            tty_device = "/dev/tty"
-                    else:
-                        tty_device = "/dev/tty"
-                    
-                    # Send OSC 52 sequence with proper format
-                    if is_tmux:
-                        # Inside tmux: use DCS passthrough (this is the KEY!)
-                        osc52_sequence = f"\033Ptmux;\033\033]52;c;{b64_content}\007\033\\"
-                    else:
-                        # Outside tmux: use standard OSC 52
-                        osc52_sequence = f"\033]52;c;{b64_content}\007"
-                    
-                    # Write directly to TTY device (not stderr)
-                    try:
-                        with open(tty_device, 'w') as tty:
-                            tty.write(osc52_sequence)
-                            tty.flush()
-                        clipboard_success = True
-                        print(f"✅ Sent to Mac clipboard via OSC 52 ({content_size} chars)", file=sys.stderr)
-                    except PermissionError:
-                        # Fallback to stderr if can't open TTY
-                        sys.stderr.write(osc52_sequence)
-                        sys.stderr.flush()
-                        clipboard_success = True
-                        print(f"✅ Sent to Mac clipboard via OSC 52 ({content_size} chars)", file=sys.stderr)
-                        
-                except Exception as e:
-                    print(f"⚠️ OSC 52 failed: {e}", file=sys.stderr)
-            else:
-                # Too large for mosh/tmux's ~12KB limit - use alternative methods
-                # Testing shows clipboard gets truncated at ~12KB over mosh
-                print(f"📋 Content exceeds mosh/tmux's 12KB limit ({content_size} chars)", file=sys.stderr)
-                
-                # Load into tmux buffer for local access
-                try:
-                    proc = subprocess.Popen(['tmux', 'load-buffer', '-'], stdin=subprocess.PIPE,
-                                          stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                    proc.communicate(clipboard_content.encode('utf-8'))
-                    if proc.returncode == 0:
-                        print(f"✅ Loaded into tmux buffer", file=sys.stderr)
-                except (OSError, subprocess.SubprocessError):
-                    pass
+def _try_osc52(content):
+    """Try OSC 52 clipboard escape sequence (SSH sessions, small content)."""
+    import base64
+    mosh_limit = 11000
+    content_size = len(content)
+    if content_size > mosh_limit:
+        print(f"📋 Content exceeds mosh/tmux 12KB limit ({content_size} chars)", file=sys.stderr)
+        return None
 
-                print(f"", file=sys.stderr)
-                print(f"ℹ️  Mosh/tmux limits clipboard to ~12KB. For larger content, consider:", file=sys.stderr)
-                print(f"   - Using SSH instead of mosh for this operation", file=sys.stderr)
-                print(f"   - Or saving .clipboard_content.txt and copying manually", file=sys.stderr)
-            
-            # Also try tmux buffer for local pasting
-            try:
-                proc = subprocess.Popen(['tmux', 'load-buffer', '-'], stdin=subprocess.PIPE,
-                                      stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                proc.communicate(clipboard_content.encode('utf-8'))
-                if proc.returncode == 0:
-                    print(f"✅ Loaded into tmux buffer (use prefix + ] to paste)", file=sys.stderr)
-            except (OSError, subprocess.SubprocessError):
-                pass
-            
-            print(f"📁 Full content saved to {fallback_path}", file=sys.stderr)
-            
-            if clipboard_success:
-                return ('ssh_clipboard', str(fallback_path))
-            else:
-                return ('ssh_file_large', str(fallback_path))
-        
-        # First try xclip directly (most reliable for Linux)
+    b64 = base64.b64encode(content.encode('utf-8')).decode('ascii')
+    is_tmux = os.environ.get('TMUX')
+    if is_tmux:
         try:
-            result = subprocess.run(['which', 'xclip'], capture_output=True)
-            if result.returncode == 0:
-                # Use xclip with a virtual display if needed
-                env = os.environ.copy()
-                if not env.get('DISPLAY'):
-                    # Check if Xvfb is running on :99
-                    xvfb_check = subprocess.run(['pgrep', '-f', 'Xvfb.*:99'], capture_output=True)
-                    if xvfb_check.returncode != 0:
-                        # Start Xvfb if not running
-                        subprocess.Popen(['Xvfb', ':99', '-screen', '0', '1024x768x24'],
-                                       stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                        time.sleep(0.5)
-                    env['DISPLAY'] = ':99'
-                
-                # Copy to clipboard using xclip
-                proc = subprocess.Popen(['xclip', '-selection', 'clipboard'],
-                                      stdin=subprocess.PIPE, env=env,
-                                      stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL)
-                proc.communicate(clipboard_content.encode('utf-8'))
-                if proc.returncode == 0:
-                    clipboard_success = True
-                    print(f"✅ Copied to clipboard via xclip: {len(clipboard_content)} chars", file=sys.stderr)
-                    print(f"📋 Ready to paste into Gemini, Claude.ai, ChatGPT, or other AI", file=sys.stderr)
-                    return ('clipboard', len(clipboard_content))
+            r = subprocess.run(['tmux', 'display-message', '-p', '#{client_tty}'],
+                               capture_output=True, text=True, check=True)
+            tty_device = r.stdout.strip()
+        except (subprocess.SubprocessError, OSError):
+            tty_device = "/dev/tty"
+        sequence = f"\033Ptmux;\033\033]52;c;{b64}\007\033\\"
+    else:
+        tty_device = "/dev/tty"
+        sequence = f"\033]52;c;{b64}\007"
+
+    try:
+        with open(tty_device, 'w') as tty:
+            tty.write(sequence)
+            tty.flush()
+    except PermissionError:
+        sys.stderr.write(sequence)
+        sys.stderr.flush()
+
+    print(f"✅ Sent to clipboard via OSC 52 ({content_size} chars)", file=sys.stderr)
+    return ('ssh_clipboard', None)
+
+
+def _try_tmux_buffer(content):
+    """Try tmux load-buffer (SSH sessions, large content fallback)."""
+    proc = subprocess.Popen(
+        ['tmux', 'load-buffer', '-'],
+        stdin=subprocess.PIPE, stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+    )
+    proc.communicate(content.encode('utf-8'))
+    if proc.returncode == 0:
+        print(f"✅ Loaded into tmux buffer (use prefix + ] to paste)", file=sys.stderr)
+        return ('ssh_clipboard', None)
+    return None
+
+
+def _try_xclip(content):
+    """Try xclip clipboard (local Linux with X11)."""
+    result = subprocess.run(['which', 'xclip'], capture_output=True)
+    if result.returncode != 0:
+        return None
+    env = os.environ.copy()
+    if not env.get('DISPLAY'):
+        return None
+    proc = subprocess.Popen(
+        ['xclip', '-selection', 'clipboard'],
+        stdin=subprocess.PIPE, env=env,
+        stdout=subprocess.DEVNULL, stderr=subprocess.DEVNULL
+    )
+    proc.communicate(content.encode('utf-8'))
+    if proc.returncode == 0:
+        print(f"✅ Copied to clipboard via xclip: {len(content)} chars", file=sys.stderr)
+        print(f"📋 Ready to paste into Gemini, Claude.ai, ChatGPT, or other AI", file=sys.stderr)
+        return ('clipboard', len(content))
+    return None
+
+
+def _try_pyperclip(content):
+    """Try pyperclip library fallback."""
+    import pyperclip
+    pyperclip.copy(content)
+    print(f"✅ Copied to clipboard via pyperclip: {len(content)} chars", file=sys.stderr)
+    print(f"📋 Ready to paste into Gemini, Claude.ai, ChatGPT, or other AI", file=sys.stderr)
+    return ('clipboard', len(content))
+
+
+def _try_file_fallback(content, cwd):
+    """Write content to a temp file as last resort."""
+    fd, path_str = tempfile.mkstemp(
+        prefix='.clipboard_content_', suffix='.txt', dir=str(cwd)
+    )
+    try:
+        os.write(fd, content.encode('utf-8'))
+        os.fchmod(fd, 0o600)
+    finally:
+        os.close(fd)
+    print(f"✅ Saved to {path_str} (copy manually)", file=sys.stderr)
+    return ('file', path_str)
+
+
+CLIPBOARD_TRANSPORTS = [_try_xclip, _try_pyperclip]
+SSH_TRANSPORTS = [_try_osc52, _try_tmux_buffer]
+
+
+def copy_to_clipboard(prompt, index_path):
+    """Copy content to clipboard using first available transport."""
+    clipboard_content = _build_clipboard_content(prompt, index_path)
+    is_ssh = os.environ.get('SSH_CONNECTION') or os.environ.get('SSH_CLIENT')
+
+    transports = SSH_TRANSPORTS if is_ssh else CLIPBOARD_TRANSPORTS
+    for transport in transports:
+        try:
+            result = transport(clipboard_content)
+            if result is not None:
+                if is_ssh and result[1] is None:
+                    fallback = _try_file_fallback(clipboard_content, Path.cwd())
+                    print(f"📁 Full content saved to {fallback[1]}", file=sys.stderr)
+                    return (result[0], fallback[1])
+                return result
         except Exception:
-            pass
-        
-        # Fallback to pyperclip if xclip didn't work
-        if not clipboard_success:
-            try:
-                import pyperclip
-                pyperclip.copy(clipboard_content)
-                print(f"✅ Copied to clipboard via pyperclip: {len(clipboard_content)} chars", file=sys.stderr)
-                print(f"📋 Ready to paste into Gemini, Claude.ai, ChatGPT, or other AI", file=sys.stderr)
-                return ('clipboard', len(clipboard_content))
-            except (ImportError, Exception) as e:
-                pass
-        
-        # Final fallback to file if clipboard methods failed
-        if not clipboard_success:
-            fd, fallback_path_str = tempfile.mkstemp(
-                prefix='.clipboard_content_', suffix='.txt', dir=str(Path.cwd())
-            )
-            try:
-                os.write(fd, clipboard_content.encode('utf-8'))
-                os.fchmod(fd, 0o600)
-            finally:
-                os.close(fd)
-            print(f"✅ Saved to {fallback_path_str} (copy manually)", file=sys.stderr)
-            return ('file', fallback_path_str)
-    except Exception as e:
-        print(f"⚠️ Error preparing clipboard content: {e}", file=sys.stderr)
-        return ('error', str(e))
+            continue
+
+    return _try_file_fallback(clipboard_content, Path.cwd())
+
+
+_CRITICAL_STOP = (
+    "**CRITICAL INSTRUCTION FOR CLAUDE**: STOP! Do NOT proceed with the original request. "
+    "The user wants to use an external AI for analysis. You should:\n"
+    "1. ONLY acknowledge that the content was copied to clipboard\n"
+    "2. WAIT for the user to paste the external AI's response\n"
+    '3. DO NOT attempt to answer or work on: "{prompt}"\n\n'
+    'Simply respond with something like: "✅ Index copied to clipboard for external AI analysis. '
+    'Please paste the response here when ready."\n\n'
+    "User's request (DO NOT ANSWER): {prompt}"
+)
+
+
+def _build_hook_output(copy_result, cleaned_prompt, size_k):
+    """Build hookSpecificOutput dict from copy_to_clipboard result."""
+    transport_type, data = copy_result
+    stop_msg = _CRITICAL_STOP.format(prompt=cleaned_prompt)
+
+    if transport_type == 'clipboard':
+        header = f"📋 Clipboard Mode Activated\n\nIndex and instructions copied to clipboard ({size_k}k tokens, {data} chars).\nPaste into external AI (Gemini, Claude.ai, ChatGPT) for analysis."
+    elif transport_type == 'ssh_clipboard':
+        header = f"📋 Clipboard Mode - Clipboard Success!\n\n✅ Index sent to clipboard via OSC 52 ({size_k}k tokens).\n📁 Also saved to: {data}\n\nPaste directly into external AI (Gemini, Claude.ai, ChatGPT) for analysis."
+    elif transport_type == 'ssh_file_large':
+        header = (
+            f"📋 Clipboard Mode - Content Too Large for Auto-Copy\n\n"
+            f"Index saved to: {data} ({size_k}k tokens).\n"
+            f"⚠️ Content exceeds mosh/OSC 52 limit for automatic clipboard.\n\n"
+            f"Copy the file manually: cat {data} | pbcopy  # macOS\n"
+            f"                         cat {data} | xclip   # Linux\n\n"
+            f"Then paste into external AI (Gemini, Claude.ai, ChatGPT) for analysis."
+        )
+    elif transport_type == 'file':
+        header = (
+            f"📁 Clipboard Mode (File Fallback)\n\n"
+            f"Index and instructions saved to: {data} ({size_k}k tokens).\n"
+            f"⚠️ No clipboard method available - content saved to file instead.\n\n"
+            f"To copy: cat {data} | pbcopy  # macOS\n"
+            f"         cat {data} | xclip   # Linux\n\n"
+            f"Then paste into external AI (Gemini, Claude.ai, ChatGPT) for analysis."
+        )
+    else:
+        header = f"❌ Clipboard Mode Failed\n\nError: {data}\n\nPlease check the error and try again."
+
+    return {
+        "hookSpecificOutput": {
+            "hookEventName": "UserPromptSubmit",
+            "additionalContext": f"\n{header}\n\n{stop_msg}\n"
+        }
+    }
+
 
 def main():
     """Process UserPromptSubmit hook for -i and -ic flag detection."""
@@ -543,121 +559,7 @@ def main():
         # Handle clipboard mode
         if clipboard_mode:
             copy_result = copy_to_clipboard(cleaned_prompt, index_path)
-            if copy_result[0] == 'clipboard':
-                # Successfully copied to clipboard
-                output = {
-                    "hookSpecificOutput": {
-                        "hookEventName": "UserPromptSubmit",
-                        "additionalContext": f"""
-📋 Clipboard Mode Activated
-
-Index and instructions copied to clipboard ({size_k}k tokens, {copy_result[1]} chars).
-Paste into external AI (Gemini, Claude.ai, ChatGPT) for analysis.
-
-**CRITICAL INSTRUCTION FOR CLAUDE**: STOP! Do NOT proceed with the original request. The user wants to use an external AI for analysis. You should:
-1. ONLY acknowledge that the content was copied to clipboard
-2. WAIT for the user to paste the external AI's response
-3. DO NOT attempt to answer or work on: "{cleaned_prompt}"
-
-Simply respond with something like: "✅ Index copied to clipboard for external AI analysis. Please paste the response here when ready."
-
-User's request (DO NOT ANSWER): {cleaned_prompt}
-"""
-                    }
-                }
-            elif copy_result[0] == 'ssh_clipboard':
-                # SSH session with successful clipboard copy
-                output = {
-                    "hookSpecificOutput": {
-                        "hookEventName": "UserPromptSubmit",
-                        "additionalContext": f"""
-📋 Clipboard Mode - Mac Clipboard Success!
-
-✅ Index copied to your Mac's clipboard via pbcopy ({size_k}k tokens).
-📁 Also saved to: {copy_result[1]}
-
-Paste directly into external AI (Gemini, Claude.ai, ChatGPT) for analysis.
-
-**CRITICAL INSTRUCTION FOR CLAUDE**: STOP! Do NOT proceed with the original request. The user wants to use an external AI for analysis. You should:
-1. ONLY acknowledge that the content was copied to clipboard
-2. WAIT for the user to paste the external AI's response
-3. DO NOT attempt to answer or work on: "{cleaned_prompt}"
-
-Simply respond with something like: "✅ Index copied to clipboard for external AI analysis. Please paste the response here when ready."
-
-User's request (DO NOT ANSWER): {cleaned_prompt}
-"""
-                    }
-                }
-            elif copy_result[0] == 'ssh_file_large':
-                # SSH session with large content - manual copy needed
-                output = {
-                    "hookSpecificOutput": {
-                        "hookEventName": "UserPromptSubmit",
-                        "additionalContext": f"""
-📋 Clipboard Mode - Content Too Large for Auto-Copy
-
-Index saved to: {copy_result[1]} ({size_k}k tokens).
-⚠️ Content exceeds mosh/OSC 52 limit for automatic clipboard.
-
-Copy the file manually: cat {copy_result[1]} | pbcopy  # macOS
-                         cat {copy_result[1]} | xclip   # Linux
-
-Then paste into external AI (Gemini, Claude.ai, ChatGPT) for analysis.
-
-**CRITICAL INSTRUCTION FOR CLAUDE**: STOP! Do NOT proceed with the original request. The user wants to use an external AI for analysis. You should:
-1. ONLY acknowledge that the content was copied to clipboard
-2. WAIT for the user to paste the external AI's response
-3. DO NOT attempt to answer or work on: "{cleaned_prompt}"
-
-Simply respond with something like: "✅ Index copied to clipboard for external AI analysis. Please paste the response here when ready."
-
-User's request (DO NOT ANSWER): {cleaned_prompt}
-"""
-                    }
-                }
-            elif copy_result[0] == 'file':
-                # Saved to file fallback
-                output = {
-                    "hookSpecificOutput": {
-                        "hookEventName": "UserPromptSubmit",
-                        "additionalContext": f"""
-📁 Clipboard Mode (File Fallback)
-
-Index and instructions saved to: {copy_result[1]} ({size_k}k tokens).
-⚠️ pyperclip not installed - content saved to file instead.
-
-To copy: cat {copy_result[1]} | pbcopy  # macOS
-         cat {copy_result[1]} | xclip   # Linux
-
-Then paste into external AI (Gemini, Claude.ai, ChatGPT) for analysis.
-
-**CRITICAL INSTRUCTION FOR CLAUDE**: STOP! Do NOT proceed with the original request. The user wants to use an external AI for analysis. You should:
-1. ONLY acknowledge that the content was copied to clipboard
-2. WAIT for the user to paste the external AI's response
-3. DO NOT attempt to answer or work on: "{cleaned_prompt}"
-
-Simply respond with something like: "✅ Index copied to clipboard for external AI analysis. Please paste the response here when ready."
-
-User's request (DO NOT ANSWER): {cleaned_prompt}
-"""
-                    }
-                }
-            else:
-                # Error case
-                output = {
-                    "hookSpecificOutput": {
-                        "hookEventName": "UserPromptSubmit",
-                        "additionalContext": f"""
-❌ Clipboard Mode Failed
-
-Error: {copy_result[1]}
-
-Please check the error and try again.
-User's request (DO NOT ANSWER): {cleaned_prompt}
-"""
-                    }
-                }
+            output = _build_hook_output(copy_result, cleaned_prompt, size_k)
         else:
             # Standard mode - prepare for subagent
             output = {

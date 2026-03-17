@@ -19,6 +19,7 @@ __version__ = "0.2.0-beta"
 import json
 import os
 import re
+import tempfile
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
@@ -731,9 +732,26 @@ def main():
         # Note: Full metadata is added by the hook after generation
         index['_meta']['target_size_k'] = target_size_k
     
-    # Save to PROJECT_INDEX.json (minified)
+    # Save to PROJECT_INDEX.json (minified) using atomic write
     output_path = Path('PROJECT_INDEX.json')
-    output_path.write_text(json.dumps(index, separators=(',', ':')))
+    content = json.dumps(index, separators=(',', ':'))
+    tmp_fd, tmp_path = tempfile.mkstemp(
+        dir=str(output_path.parent),
+        suffix='.tmp',
+        prefix='.PROJECT_INDEX_'
+    )
+    try:
+        os.write(tmp_fd, content.encode('utf-8'))
+        os.close(tmp_fd)
+        os.replace(tmp_path, str(output_path))
+    except Exception:
+        try:
+            os.close(tmp_fd)
+        except Exception:
+            pass
+        if os.path.exists(tmp_path):
+            os.unlink(tmp_path)
+        raise
     
     # Print summary
     print_summary(index, skipped_count)
