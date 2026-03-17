@@ -31,6 +31,14 @@ python3 -m pytest tests/test_parsers.py::test_python_simple_function -v
 
 # Run installer (from repo root)
 bash install.sh
+
+# Query the index (requires PROJECT_INDEX.json)
+python3 scripts/cli.py query who-calls <symbol>
+python3 scripts/cli.py query blast-radius <symbol>
+python3 scripts/cli.py query dead-code
+python3 scripts/cli.py query deps <file_path>
+python3 scripts/cli.py query search <regex_pattern>
+python3 scripts/cli.py query summary <file_path>
 ```
 
 ## Architecture
@@ -60,6 +68,13 @@ The system is a **hook-driven pipeline** with three phases:
 - **Clipboard mode** (`-ic`): Copies index + instructions to clipboard (tries OSC 52 → xclip → pyperclip → file fallback) for external AI tools
 - **Stop hook** (`scripts/stop_hook.py`): Smart regeneration — checks staleness via `should_regenerate()` before rebuilding; skips when index is fresh
 
+### 4. Query & Analysis Layer (added in M6-M8)
+- **Query Engine** (`scripts/query_engine.py`): 6 structural queries — `who_calls`, `blast_radius`, `dead_code`, `dependency_chain`, `search_symbols`, `file_summary`. Factory: `QueryEngine.from_file(path)`. Understands both dense and verbose index formats.
+- **CLI** (`scripts/cli.py`): Standalone interface wrapping QueryEngine — `python3 scripts/cli.py query <command>`. Auto-discovers `PROJECT_INDEX.json` by searching parent directories.
+- **Incremental Cache** (`scripts/cache_db.py`): SQLite-based per-file parse cache at `~/.claude-code-project-index/cache.db`. Two-tier dirty detection (mtime+size fast path → SHA-256 content hash). Invalidated on tool version bump (`CURRENT_TOOL_VERSION`). If >50% files dirty, recommends full rebuild.
+- **PageRank** (`scripts/pagerank.py`): Scores symbol importance from call graph edges using power iteration (no external deps). Top 50 symbols stored in `_meta.symbol_importance`. Used to prioritize files during emergency compression.
+- **MCP Server** (`scripts/mcp_server.py`): Exposes all 6 QueryEngine methods as read-only MCP tools via FastMCP (optional `pip install fastmcp`). Uses stdio transport. Configure in `~/.claude/settings.json` under `mcpServers`.
+
 ### Key Constants
 - `MAX_FILES = 10000`, `MAX_INDEX_SIZE = 1MB`, `MAX_TREE_DEPTH = 5` (in `project_index.py`)
 - `DEFAULT_SIZE_K = 50`, `CLAUDE_MAX_K = 100`, `EXTERNAL_MAX_K = 800` (in `i_flag_hook.py`)
@@ -76,14 +91,18 @@ The output `PROJECT_INDEX.json` uses compressed keys:
 - `g`: call graph edges as `[[caller, callee], ...]`
 - `d`: documentation map (markdown headers)
 - `deps`: dependency graph (imports per file)
-- `_meta`: generation metadata (target size, actual size, files hash, timestamps)
+- `xg`: cross-file call graph edges (resolved via import map) as `[[caller, callee], ...]`
+- `dir_purposes`: inferred directory purposes (e.g., `"scripts": "Core logic"`)
+- `_meta`: generation metadata (target size, actual size, files hash, timestamps, `symbol_importance` from PageRank)
 
 ## Language Parsing
 
-Regex-based signature extraction for Python, JavaScript/TypeScript, Shell. All other languages are listed (file tracked) but not parsed. Parsers are registered in `PARSER_REGISTRY` (`index_utils.py`). To add a language: write `extract_X_signatures(content)`, register in `PARSER_REGISTRY` dict.
+**Python** uses AST-based parsing by default (`ast.parse()` + `ast.unparse()` in `extract_python_signatures_ast()`), controlled by `V2_AST_PARSER` env var (set to `0` to fall back to regex). Falls back to regex automatically on `SyntaxError`. **JavaScript/TypeScript and Shell** use regex-based extraction. **Go, Rust, Java, Ruby** use ast-grep (`sg`) when installed — auto-detected at module load via `shutil.which('sg')`, silent no-op if absent. All other languages are listed (file tracked) but not parsed. Parsers are registered in `PARSER_REGISTRY` (`index_utils.py`).
 
 ## Extending
 
 **Add a language parser:** Create a function `extract_X_signatures(content: str) -> Dict` in `index_utils.py`, add entries to `PARSER_REGISTRY` in `register_parsers()`, add extension to `PARSEABLE_LANGUAGES` and `CODE_EXTENSIONS`.
+
+**Add an ast-grep language:** Install `sg` (ast-grep). Add the extension→language mapping to the `sg_langs` dict in `register_parsers()`. The system auto-discovers `sg` at load time and registers parsers for all mapped languages.
 
 **Add a clipboard transport:** Write a `_try_X(content)` function returning `('transport_name', data)` or `None`, add to `CLIPBOARD_TRANSPORTS` or `SSH_TRANSPORTS` list in `i_flag_hook.py`.
