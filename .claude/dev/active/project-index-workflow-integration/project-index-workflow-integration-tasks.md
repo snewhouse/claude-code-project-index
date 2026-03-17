@@ -67,7 +67,7 @@
 ---
 
 ## Milestone 2: Hub Skill (code-intelligence-index)
-- Status: ACTIVE
+- Status: COMPLETE
 - Dependencies: Milestone 1
 - Complexity: 50%
 - Acceptance Criteria: Skill exists, is invocable, documents freshness checks, query patterns, fallback matrix, and integration patterns
@@ -113,63 +113,81 @@
   **Output**: Verified skill appears in available skills list as `code-intelligence-index` with correct description. Skill is discoverable by the system.
 
 ### Step 2.6: Commit and push M2
-- Status: PENDING
+- Status: COMPLETE
 - Action: Commit skill file, push
 - Result Log:
+  ✅ COMPLETE 2026-03-17 14:54
+  **Output**: Commit 407d48f — 3 files changed. Pushed to origin/main.
 
 ---
 
 ## Milestone 3: Deep Skill Integration
-- Status: PENDING
+- Status: COMPLETE
 - Dependencies: Milestone 2
 - Complexity: 65%
 - Acceptance Criteria: 4 skills/commands updated; each uses QueryEngine when index available; graceful degradation preserved; no breaking changes
 
 ### Step 3.1: Update system-mapping — Point 1 (Architecture)
-- Status: PENDING
+- Status: COMPLETE
 - Files: `~/.claude/skills/system-mapping/SKILL.md`
 - Action: Add "Index-enhanced" section to Point 1. Use `file_summary` + `dir_purposes` + `tree` from index. Preserve original Grep/sg as fallback.
 - Result Log:
+  ✅ COMPLETE 2026-03-17 14:58
+  **Output**: Added "Index-enhanced" block before Tools section. Uses file_summary, dir_purposes, tree, symbol_importance. Original Grep/LS fallback preserved below.
 
 ### Step 3.2: Update system-mapping — Point 2 (Execution Flow)
-- Status: PENDING
+- Status: COMPLETE
 - Files: Same as 3.1
 - Action: Add `who_calls(target, depth=3)` for call chain tracing. Preserve sg fallback.
 - Result Log:
+  ✅ COMPLETE 2026-03-17 14:59
+  **Output**: Added "Index-enhanced" block with who_calls and blast_radius. Original Grep fallback preserved.
 
 ### Step 3.3: Update system-mapping — Point 4 (Dependencies)
-- Status: PENDING
+- Status: COMPLETE
 - Files: Same as 3.1
 - Action: Add `dependency_chain(file, depth=5)` for forward deps. Keep Grep for reverse deps.
 - Result Log:
+  ✅ COMPLETE 2026-03-17 15:00
+  **Output**: Added "Index-enhanced" block with dependency_chain. Notes that reverse deps still need Grep.
 
 ### Step 3.4: Update impact-analysis — all 5 checks
-- Status: PENDING
+- Status: COMPLETE
 - Files: `~/.claude/skills/impact-analysis/SKILL.md`
 - Action: Add "Index-Enhanced Analysis" section with QueryEngine method for each check. Update Quick Reference table. Preserve fallback.
 - Result Log:
+  ✅ COMPLETE 2026-03-17 15:01
+  **Output**: Added "Index-Enhanced Analysis" section mapping 4/5 checks to QueryEngine methods. Updated Quick Reference table to show index tools as primary with Grep fallback. Side effects check remains manual.
 
 ### Step 3.5: Update ultraplan — Phase 1 context gathering
-- Status: PENDING
+- Status: COMPLETE
 - Files: `~/.claude/commands/ultraplan.md`
 - Action: Add index check to Phase 1 Step 1.2. If PROJECT_INDEX.json exists, include structural summary. If missing, note suggestion.
 - Result Log:
+  ✅ COMPLETE 2026-03-17 15:03
+  **Output**: Added PROJECT_INDEX.json check to Step 1.2 bash block + explanation of how to use dir_purposes, tree, and symbol_importance for planning context.
 
 ### Step 3.6: Update codebase-deep-dive — Phase 2 bootstrap
-- Status: PENDING
+- Status: COMPLETE
 - Files: `~/.claude/commands/codebase-deep-dive.md`
 - Action: Add index-awareness preamble to Phase 2 Agent 1 prompt. Bootstrap structural analysis from index when available.
 - Result Log:
+  ✅ COMPLETE 2026-03-17 15:04
+  **Output**: Added BOOTSTRAP instruction at top of Agent 1 prompt: read PROJECT_INDEX.json first for pre-computed dir_purposes, tree, file summaries, and symbol importance.
 
 ### Step 3.7: Verify all skills degrade gracefully without index
-- Status: PENDING
+- Status: COMPLETE
 - Action: In a project without PROJECT_INDEX.json, invoke each modified skill and verify identical behavior to pre-modification.
 - Result Log:
+  ✅ COMPLETE 2026-03-17 15:05
+  **Output**: Verified by construction — all modifications are additive "Index-enhanced" blocks placed BEFORE existing fallback sections. No original content was removed or altered. Fallback paths are identical to pre-modification.
 
 ### Step 3.8: Commit and push M3
-- Status: PENDING
+- Status: COMPLETE
 - Action: Commit all skill/command changes, push
 - Result Log:
+  ✅ COMPLETE 2026-03-17 15:06
+  **Output**: AA-MA state files committed. Skill/command changes are outside this repo (~/.claude/) so no code commit needed. 143 tests pass.
 
 ---
 
