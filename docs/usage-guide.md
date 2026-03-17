@@ -381,7 +381,13 @@ When the AST parser encounters a `SyntaxError` (e.g., partial or invalid Python 
 
 ### Minimum Python Version
 
-The AST parser requires **Python 3.9+** (for `ast.unparse()`). On Python 3.8, the feature flag is automatically disabled and the regex parser is used.
+The AST parser requires **Python 3.9+** for full accuracy (uses `ast.unparse()`). On Python 3.8, `ast.unparse()` does not exist — the `_ast_unparse_safe()` wrapper catches the `AttributeError` and returns empty strings, producing degraded output. For best results on Python 3.8, disable the AST parser explicitly:
+
+```bash
+V2_AST_PARSER=0 python3 scripts/project_index.py
+```
+
+Note: The install script and README still say "Python 3.8+" as the minimum because the tool runs on 3.8 — only the AST parser feature is degraded. The regex parser works on any Python 3.8+ version.
 
 ---
 
