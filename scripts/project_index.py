@@ -169,6 +169,61 @@ def _discover_files(root: Path) -> Tuple[List[Path], int, Dict]:
     return files_to_process, dir_count, directory_files
 
 
+def _parse_single_file(
+    file_path: Path, rel_path, index: Dict, cache_conn
+) -> bool:
+    """Parse a single code file, using cache when available.
+
+    Returns True if the result came from cache (cache hit).
+    """
+    language = get_language_name(file_path.suffix)
+    file_info = {'language': language, 'parsed': False}
+
+    file_purpose = infer_file_purpose(file_path)
+    if file_purpose:
+        file_info['purpose'] = file_purpose
+
+    if file_path.suffix in PARSEABLE_LANGUAGES:
+        cached_result = None
+        if cache_conn is not None:
+            from cache_db import is_file_dirty, get_cached_result, update_cache
+            rel_path_str = str(rel_path)
+            if not is_file_dirty(cache_conn, rel_path_str, file_path):
+                cached_result = get_cached_result(cache_conn, rel_path_str)
+
+        if cached_result is not None:
+            if cached_result.get('functions') or cached_result.get('classes', {}):
+                file_info.update(cached_result)
+                file_info['parsed'] = True
+            lang_key = PARSEABLE_LANGUAGES[file_path.suffix]
+            index['stats']['fully_parsed'][lang_key] = \
+                index['stats']['fully_parsed'].get(lang_key, 0) + 1
+            index['files'][str(rel_path)] = file_info
+            return True
+        else:
+            try:
+                content = file_path.read_text(encoding='utf-8', errors='ignore')
+                extracted = parse_file(content, file_path.suffix) or {'functions': {}, 'classes': {}}
+                if extracted['functions'] or extracted.get('classes', {}):
+                    file_info.update(extracted)
+                    file_info['parsed'] = True
+                lang_key = PARSEABLE_LANGUAGES[file_path.suffix]
+                index['stats']['fully_parsed'][lang_key] = \
+                    index['stats']['fully_parsed'].get(lang_key, 0) + 1
+                if cache_conn is not None:
+                    from cache_db import update_cache
+                    update_cache(cache_conn, str(rel_path), file_path, extracted, language)
+            except Exception:
+                index['stats']['listed_only'][language] = \
+                    index['stats']['listed_only'].get(language, 0) + 1
+    else:
+        index['stats']['listed_only'][language] = \
+            index['stats']['listed_only'].get(language, 0) + 1
+
+    index['files'][str(rel_path)] = file_info
+    return False
+
+
 def _parse_all_files(
     files_to_process: List[Path], root: Path, index: Dict, directory_files: Dict,
     cache_conn=None
@@ -205,7 +260,6 @@ def _parse_all_files(
         if parent_dir in directory_files:
             directory_files[parent_dir].append(file_path.name)
 
-        # Get relative path and language
         rel_path = file_path.relative_to(root)
 
         # Handle markdown files specially
@@ -217,62 +271,9 @@ def _parse_all_files(
             continue
 
         # Handle code files
-        language = get_language_name(file_path.suffix)
-
-        file_info = {
-            'language': language,
-            'parsed': False
-        }
-
-        file_purpose = infer_file_purpose(file_path)
-        if file_purpose:
-            file_info['purpose'] = file_purpose
-
-        # Try to parse if we support this language
-        if file_path.suffix in PARSEABLE_LANGUAGES:
-            # Check cache first when incremental mode is active
-            cached_result = None
-            if cache_conn is not None:
-                from cache_db import is_file_dirty, get_cached_result, update_cache
-                rel_path_str = str(rel_path)
-                if not is_file_dirty(cache_conn, rel_path_str, file_path):
-                    cached_result = get_cached_result(cache_conn, rel_path_str)
-
-            if cached_result is not None:
-                # Use cached parse result
-                if cached_result.get('functions') or cached_result.get('classes', {}):
-                    file_info.update(cached_result)
-                    file_info['parsed'] = True
-                cache_hits += 1
-
-                lang_key = PARSEABLE_LANGUAGES[file_path.suffix]
-                index['stats']['fully_parsed'][lang_key] = \
-                    index['stats']['fully_parsed'].get(lang_key, 0) + 1
-            else:
-                try:
-                    content = file_path.read_text(encoding='utf-8', errors='ignore')
-                    extracted = parse_file(content, file_path.suffix) or {'functions': {}, 'classes': {}}
-
-                    if extracted['functions'] or extracted.get('classes', {}):
-                        file_info.update(extracted)
-                        file_info['parsed'] = True
-
-                    lang_key = PARSEABLE_LANGUAGES[file_path.suffix]
-                    index['stats']['fully_parsed'][lang_key] = \
-                        index['stats']['fully_parsed'].get(lang_key, 0) + 1
-
-                    # Update cache if incremental mode is active
-                    if cache_conn is not None:
-                        update_cache(cache_conn, str(rel_path), file_path, extracted, language)
-
-                except Exception:
-                    index['stats']['listed_only'][language] = \
-                        index['stats']['listed_only'].get(language, 0) + 1
-        else:
-            index['stats']['listed_only'][language] = \
-                index['stats']['listed_only'].get(language, 0) + 1
-
-        index['files'][str(rel_path)] = file_info
+        is_cache_hit = _parse_single_file(file_path, rel_path, index, cache_conn)
+        if is_cache_hit:
+            cache_hits += 1
         file_count += 1
 
         if file_count % 100 == 0:
@@ -398,6 +399,63 @@ def _build_call_graph(index: Dict) -> None:
                                     }
 
 
+def _build_post_processing(
+    root: Path, index: Dict, directory_files: Dict,
+    file_count: int, dir_count: int
+) -> None:
+    """Run post-processing on the index: directory purposes, graphs, cross-file edges, PageRank.
+
+    Modifies the index in-place.
+    """
+    # Infer directory purposes
+    print("🏗️  Analyzing directory purposes...")
+    for dir_path, files in directory_files.items():
+        if files:
+            purpose = infer_directory_purpose(dir_path, files)
+            if purpose:
+                rel_dir = str(dir_path.relative_to(root))
+                if rel_dir != '.':
+                    index['directory_purposes'][rel_dir] = purpose
+
+    index['stats']['total_files'] = file_count
+    index['stats']['total_directories'] = dir_count
+
+    # Build dependency graph
+    print("🔗 Building dependency graph...")
+    dependency_graph = _build_dep_graph(index)
+    if dependency_graph:
+        index['dependency_graph'] = dependency_graph
+
+    # Build bidirectional call graph
+    print("📞 Building call graph...")
+    _build_call_graph(index)
+
+    # Build cross-file resolution
+    print("🔗 Resolving cross-file edges...")
+    from index_utils import build_import_map, resolve_cross_file_edges
+    import_map = build_import_map(root)
+    xg_edges = resolve_cross_file_edges(index, import_map)
+    if xg_edges:
+        index['xg'] = xg_edges
+
+    # Compute symbol importance (PageRank)
+    from pagerank import compute_pagerank
+    all_edges = _build_dense_call_graph_edges(index)
+    if index.get('xg'):
+        all_edges.extend(index['xg'])
+    importance = compute_pagerank(all_edges)
+    if importance:
+        if '_meta' not in index:
+            index['_meta'] = {}
+        # Store top 50 most important symbols
+        top_symbols = sorted(importance.items(), key=lambda x: x[1], reverse=True)[:50]
+        index['_meta']['symbol_importance'] = {k: round(v, 4) for k, v in top_symbols}
+
+    # Add staleness check
+    week_old = datetime.now().timestamp() - 7 * 24 * 60 * 60
+    index['staleness_check'] = week_old
+
+
 def build_index(root_dir: str, incremental: bool = False) -> Tuple[Dict, int]:
     """Build the enhanced index with architectural awareness.
 
@@ -462,53 +520,8 @@ def build_index(root_dir: str, incremental: bool = False) -> Tuple[Dict, int]:
         except Exception as e:
             print(f"   Warning: Cache cleanup failed ({e})")
 
-    # Infer directory purposes
-    print("🏗️  Analyzing directory purposes...")
-    for dir_path, files in directory_files.items():
-        if files:
-            purpose = infer_directory_purpose(dir_path, files)
-            if purpose:
-                rel_dir = str(dir_path.relative_to(root))
-                if rel_dir != '.':
-                    index['directory_purposes'][rel_dir] = purpose
-
-    index['stats']['total_files'] = file_count
-    index['stats']['total_directories'] = dir_count
-
-    # Build dependency graph
-    print("🔗 Building dependency graph...")
-    dependency_graph = _build_dep_graph(index)
-    if dependency_graph:
-        index['dependency_graph'] = dependency_graph
-
-    # Build bidirectional call graph
-    print("📞 Building call graph...")
-    _build_call_graph(index)
-
-    # Build cross-file resolution
-    print("🔗 Resolving cross-file edges...")
-    from index_utils import build_import_map, resolve_cross_file_edges
-    import_map = build_import_map(root)
-    xg_edges = resolve_cross_file_edges(index, import_map)
-    if xg_edges:
-        index['xg'] = xg_edges
-
-    # Compute symbol importance (PageRank)
-    from pagerank import compute_pagerank
-    all_edges = _build_dense_call_graph_edges(index)
-    if index.get('xg'):
-        all_edges.extend(index['xg'])
-    importance = compute_pagerank(all_edges)
-    if importance:
-        if '_meta' not in index:
-            index['_meta'] = {}
-        # Store top 50 most important symbols
-        top_symbols = sorted(importance.items(), key=lambda x: x[1], reverse=True)[:50]
-        index['_meta']['symbol_importance'] = {k: round(v, 4) for k, v in top_symbols}
-
-    # Add staleness check
-    week_old = datetime.now().timestamp() - 7 * 24 * 60 * 60
-    index['staleness_check'] = week_old
+    # Post-processing: directory purposes, graphs, cross-file edges, PageRank
+    _build_post_processing(root, index, directory_files, file_count, dir_count)
 
     return index, skipped_count
 
