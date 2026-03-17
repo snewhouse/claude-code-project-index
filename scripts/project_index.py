@@ -19,6 +19,7 @@ __version__ = "0.2.0-beta"
 import json
 import os
 import re
+import tempfile
 from datetime import datetime
 from pathlib import Path
 from typing import Dict, List, Optional, Tuple
@@ -27,14 +28,36 @@ from typing import Dict, List, Optional, Tuple
 from index_utils import (
     IGNORE_DIRS, PARSEABLE_LANGUAGES, CODE_EXTENSIONS, MARKDOWN_EXTENSIONS,
     DIRECTORY_PURPOSES, extract_python_signatures, extract_javascript_signatures,
-    extract_shell_signatures, extract_markdown_structure, infer_file_purpose, 
-    infer_directory_purpose, get_language_name, should_index_file
+    extract_shell_signatures, extract_markdown_structure, infer_file_purpose,
+    infer_directory_purpose, get_language_name, should_index_file, parse_file
 )
 
 # Limits to keep it fast and simple
 MAX_FILES = 10000
 MAX_INDEX_SIZE = 1024 * 1024  # 1MB
 MAX_TREE_DEPTH = 5
+
+# Dense format key constants (used in convert_to_enhanced_dense_format and compress_if_needed)
+KEY_TIMESTAMP = 'at'
+KEY_ROOT = 'root'
+KEY_TREE = 'tree'
+KEY_STATS = 'stats'
+KEY_FILES = 'f'
+KEY_GRAPH = 'g'
+KEY_DOCS = 'd'
+KEY_DEPS = 'deps'
+KEY_DIR_PURPOSES = 'dir_purposes'
+KEY_STALENESS = 'staleness'
+KEY_META = '_meta'
+
+# Language letter abbreviations for dense format
+LANG_LETTERS = {
+    'python': 'p',
+    'javascript': 'j',
+    'typescript': 't',
+    'shell': 's',
+    'json': 'n',  # Changed from 'j' to avoid collision with javascript
+}
 
 
 def generate_tree_structure(root_path: Path, max_depth: int = MAX_TREE_DEPTH) -> List[str]:
@@ -88,7 +111,7 @@ def generate_tree_structure(root_path: Path, max_depth: int = MAX_TREE_DEPTH) ->
                     file_count = sum(1 for f in item.rglob('*') if f.is_file() and f.suffix in CODE_EXTENSIONS)
                     if file_count > 0:
                         name += f" ({file_count} files)"
-                except:
+                except (PermissionError, OSError):
                     pass
             
             tree_lines.append(prefix + current_prefix + name)
@@ -101,9 +124,6 @@ def generate_tree_structure(root_path: Path, max_depth: int = MAX_TREE_DEPTH) ->
     tree_lines.append(".")
     add_tree_level(root_path, "")
     return tree_lines
-
-
-# These functions are now imported from index_utils
 
 
 def build_index(root_dir: str) -> Tuple[Dict, int]:
@@ -219,19 +239,12 @@ def build_index(root_dir: str) -> Tuple[Dict, int]:
         if file_path.suffix in PARSEABLE_LANGUAGES:
             try:
                 content = file_path.read_text(encoding='utf-8', errors='ignore')
-                
-                # Extract based on language
-                if file_path.suffix == '.py':
-                    extracted = extract_python_signatures(content)
-                elif file_path.suffix in {'.js', '.ts', '.jsx', '.tsx'}:
-                    extracted = extract_javascript_signatures(content)
-                elif file_path.suffix in {'.sh', '.bash'}:
-                    extracted = extract_shell_signatures(content)
-                else:
-                    extracted = {'functions': {}, 'classes': {}}
-                
+
+                # Dispatch to registered parser (or empty result if none)
+                extracted = parse_file(content, file_path.suffix) or {'functions': {}, 'classes': {}}
+
                 # Only add if we found something
-                if extracted['functions'] or extracted['classes']:
+                if extracted['functions'] or extracted.get('classes', {}):
                     file_info.update(extracted)
                     file_info['parsed'] = True
                     
@@ -398,20 +411,18 @@ def build_index(root_dir: str) -> Tuple[Dict, int]:
     return index, skipped_count
 
 
-# infer_file_purpose is now imported from index_utils
-
 
 def convert_to_enhanced_dense_format(index: Dict) -> Dict:
     """Convert to enhanced dense format that preserves all AI-relevant information."""
     dense = {
-        'at': index.get('indexed_at', ''),
-        'root': index.get('root', '.'),
-        'tree': index.get('project_structure', {}).get('tree', [])[:20],  # Compact tree
-        'stats': index.get('stats', {}),
-        'f': {},     # Files
-        'g': [],     # Call graph edges
-        'd': {},     # Documentation map
-        'deps': index.get('dependency_graph', {}),  # Keep dependencies
+        KEY_TIMESTAMP: index.get('indexed_at', ''),
+        KEY_ROOT: index.get('root', '.'),
+        KEY_TREE: index.get('project_structure', {}).get('tree', [])[:20],  # Compact tree
+        KEY_STATS: index.get('stats', {}),
+        KEY_FILES: {},     # Files
+        KEY_GRAPH: [],     # Call graph edges
+        KEY_DOCS: {},      # Documentation map
+        KEY_DEPS: index.get('dependency_graph', {}),  # Keep dependencies
     }
     
     def truncate_doc(doc: str, max_len: int = 80) -> str:
@@ -435,8 +446,7 @@ def convert_to_enhanced_dense_format(index: Dict) -> Dict:
         
         # Add language as single letter
         lang = info.get('language', 'unknown')
-        lang_map = {'python': 'p', 'javascript': 'j', 'typescript': 't', 'shell': 's', 'json': 'j'}
-        file_entry.append(lang_map.get(lang, 'u'))
+        file_entry.append(LANG_LETTERS.get(lang, 'u'))
         
         # Compress functions with docstrings: name:line:signature:calls:docstring
         funcs = []
@@ -480,8 +490,8 @@ def convert_to_enhanced_dense_format(index: Dict) -> Dict:
         
         # Only add file if it has content
         if len(file_entry) > 1:
-            dense['f'][abbrev_path] = file_entry
-    
+            dense[KEY_FILES][abbrev_path] = file_entry
+
     # Build call graph edges (keep bidirectional info)
     edges = set()
     for path, info in index.get('files', {}).items():
@@ -493,7 +503,7 @@ def convert_to_enhanced_dense_format(index: Dict) -> Dict:
                         edges.add((fname, called))
                     for caller in fdata.get('called_by', []):
                         edges.add((caller, fname))
-            
+
             # Extract method calls
             for cname, cdata in info.get('classes', {}).items():
                 if isinstance(cdata, dict):
@@ -504,24 +514,24 @@ def convert_to_enhanced_dense_format(index: Dict) -> Dict:
                                 edges.add((full_name, called))
                             for caller in mdata.get('called_by', []):
                                 edges.add((caller, full_name))
-    
+
     # Convert edges to list format
-    dense['g'] = [[e[0], e[1]] for e in edges]
-    
+    dense[KEY_GRAPH] = [[e[0], e[1]] for e in edges]
+
     # Add compressed documentation map
     for doc_path, doc_info in index.get('documentation_map', {}).items():
         sections = doc_info.get('sections', [])
         if sections:
             # Keep first 10 sections for better context
-            dense['d'][doc_path] = sections[:10]
-    
+            dense[KEY_DOCS][doc_path] = sections[:10]
+
     # Add directory purposes if present
     if 'directory_purposes' in index:
-        dense['dir_purposes'] = index['directory_purposes']
-    
+        dense[KEY_DIR_PURPOSES] = index['directory_purposes']
+
     # Add staleness check timestamp
     if 'staleness_check' in index:
-        dense['staleness'] = index['staleness_check']
+        dense[KEY_STALENESS] = index['staleness_check']
     
     return dense
 
@@ -549,9 +559,9 @@ def compress_if_needed(dense_index: Dict, target_size: int = MAX_INDEX_SIZE) -> 
         return dense_index
     
     print(f"  Step {iteration}: Reducing tree structure...")
-    if len(dense_index.get('tree', [])) > 10:
-        dense_index['tree'] = dense_index['tree'][:10]
-        dense_index['tree'].append("... (truncated)")
+    if len(dense_index.get(KEY_TREE, [])) > 10:
+        dense_index[KEY_TREE] = dense_index[KEY_TREE][:10]
+        dense_index[KEY_TREE].append("... (truncated)")
         current_size = len(json.dumps(dense_index, separators=(',', ':')))
         if current_size <= target_size:
             print(f"  ✅ Compressed to {current_size} bytes")
@@ -564,7 +574,7 @@ def compress_if_needed(dense_index: Dict, target_size: int = MAX_INDEX_SIZE) -> 
         return dense_index
     
     print(f"  Step {iteration}: Truncating docstrings...")
-    for path, file_data in dense_index.get('f', {}).items():
+    for path, file_data in dense_index.get(KEY_FILES, {}).items():
         if len(file_data) > 1 and isinstance(file_data[1], list):
             # Truncate function docstrings
             new_funcs = []
@@ -587,7 +597,7 @@ def compress_if_needed(dense_index: Dict, target_size: int = MAX_INDEX_SIZE) -> 
         return dense_index
     
     print(f"  Step {iteration}: Removing docstrings entirely...")
-    for path, file_data in dense_index.get('f', {}).items():
+    for path, file_data in dense_index.get(KEY_FILES, {}).items():
         if len(file_data) > 1 and isinstance(file_data[1], list):
             # Remove docstrings from functions
             new_funcs = []
@@ -610,8 +620,8 @@ def compress_if_needed(dense_index: Dict, target_size: int = MAX_INDEX_SIZE) -> 
         return dense_index
     
     print(f"  Step {iteration}: Removing documentation map...")
-    if 'd' in dense_index:
-        del dense_index['d']
+    if KEY_DOCS in dense_index:
+        del dense_index[KEY_DOCS]
     
     current_size = len(json.dumps(dense_index, separators=(',', ':')))
     if current_size <= target_size:
@@ -625,31 +635,31 @@ def compress_if_needed(dense_index: Dict, target_size: int = MAX_INDEX_SIZE) -> 
         return dense_index
     
     print(f"  Step {iteration}: Emergency truncation - keeping most important files...")
-    if dense_index.get('f'):
-        files_to_keep = int(len(dense_index['f']) * (target_size / current_size) * 0.9)
+    if dense_index.get(KEY_FILES):
+        files_to_keep = int(len(dense_index[KEY_FILES]) * (target_size / current_size) * 0.9)
         if files_to_keep < 10:
             files_to_keep = 10
-        
+
         # Calculate importance based on function count
         file_importance = {}
-        for path, file_data in dense_index['f'].items():
+        for path, file_data in dense_index[KEY_FILES].items():
             importance = 0
             if len(file_data) > 1 and isinstance(file_data[1], list):
                 importance = len(file_data[1])  # Number of functions
             if len(file_data) > 2:  # Has classes
                 importance += 5
             file_importance[path] = importance
-        
+
         # Keep most important files
         sorted_files = sorted(file_importance.items(), key=lambda x: x[1], reverse=True)
         files_to_keep_set = set(path for path, _ in sorted_files[:files_to_keep])
-        
+
         # Remove less important files
-        for path in list(dense_index['f'].keys()):
+        for path in list(dense_index[KEY_FILES].keys()):
             if path not in files_to_keep_set:
-                del dense_index['f'][path]
-        
-        print(f"  Emergency truncation: kept {len(dense_index['f'])} most important files")
+                del dense_index[KEY_FILES][path]
+
+        print(f"  Emergency truncation: kept {len(dense_index[KEY_FILES])} most important files")
     
     final_size = len(json.dumps(dense_index, separators=(',', ':')))
     print(f"  Compressed from {len(index_json)} to {final_size} bytes")
@@ -690,15 +700,15 @@ def print_summary(index: Dict, skipped_count: int):
             print(f"   • {count} {lang.capitalize()} files")
     
     # Show documentation insights
-    if index.get('d'):
+    if index.get(KEY_DOCS):
         print(f"\n📚 Documentation insights:")
-        for doc_file, sections in list(index['d'].items())[:3]:
+        for doc_file, sections in list(index[KEY_DOCS].items())[:3]:
             print(f"   • {doc_file}: {len(sections)} sections")
-    
+
     # Show directory purposes
-    if index.get('dir_purposes'):
+    if index.get(KEY_DIR_PURPOSES):
         print(f"\n🏗️  Directory structure:")
-        for dir_path, purpose in list(index['dir_purposes'].items())[:5]:
+        for dir_path, purpose in list(index[KEY_DIR_PURPOSES].items())[:5]:
             print(f"   • {dir_path}/: {purpose}")
     
     if skipped_count > 0:
@@ -736,9 +746,26 @@ def main():
         # Note: Full metadata is added by the hook after generation
         index['_meta']['target_size_k'] = target_size_k
     
-    # Save to PROJECT_INDEX.json (minified)
+    # Save to PROJECT_INDEX.json (minified) using atomic write
     output_path = Path('PROJECT_INDEX.json')
-    output_path.write_text(json.dumps(index, separators=(',', ':')))
+    content = json.dumps(index, separators=(',', ':'))
+    tmp_fd, tmp_path = tempfile.mkstemp(
+        dir=str(output_path.parent),
+        suffix='.tmp',
+        prefix='.PROJECT_INDEX_'
+    )
+    try:
+        os.write(tmp_fd, content.encode('utf-8'))
+        os.close(tmp_fd)
+        os.replace(tmp_path, str(output_path))
+    except Exception:
+        try:
+            os.close(tmp_fd)
+        except Exception:
+            pass
+        if os.path.exists(tmp_path):
+            os.unlink(tmp_path)
+        raise
     
     # Print summary
     print_summary(index, skipped_count)

@@ -6,9 +6,66 @@ This ensures the index captures any changes made during the session.
 
 import json
 import sys
-import os
 import subprocess
 from pathlib import Path
+
+
+def _validate_python_cmd(cmd_path: str) -> bool:
+    """Validate that a python command path is safe to execute."""
+    import os
+    from pathlib import Path as _Path
+
+    path = _Path(cmd_path)
+
+    # Must be an absolute path
+    if not path.is_absolute():
+        return False
+
+    # Must exist and be executable
+    if not path.exists() or not os.access(str(path), os.X_OK):
+        return False
+
+    # Basename must look like a Python interpreter
+    basename = path.name
+    if not (basename.startswith('python') or basename == 'python3'):
+        return False
+
+    return True
+
+
+def should_regenerate(project_root: Path, index_path: Path) -> bool:
+    """Check if the index needs regeneration based on file hash staleness."""
+    if not index_path.exists():
+        return True
+
+    try:
+        import hashlib
+
+        # Quick hash of current file state
+        result = subprocess.run(
+            ['git', 'ls-files', '--cached', '--others', '--exclude-standard'],
+            cwd=str(project_root),
+            capture_output=True, text=True, timeout=5
+        )
+        if result.returncode != 0:
+            return True  # Can't determine, regenerate to be safe
+
+        files = sorted(result.stdout.strip().split('\n')) if result.stdout.strip() else []
+        hasher = hashlib.sha256()
+        for f in files:
+            fp = project_root / f
+            if fp.exists():
+                hasher.update(f"{f}:{fp.stat().st_mtime}".encode())
+        current_hash = hasher.hexdigest()[:16]
+
+        # Compare with stored hash
+        with open(index_path, 'r') as fh:
+            index = json.load(fh)
+            stored_hash = index.get('_meta', {}).get('files_hash', '')
+
+        return current_hash != stored_hash
+    except Exception:
+        return True  # On any error, regenerate to be safe
 
 
 def main():
@@ -27,7 +84,13 @@ def main():
     # If no PROJECT_INDEX.json found, nothing to do
     if not project_root:
         return
-    
+
+    # Check if regeneration is actually needed
+    index_path = project_root / 'PROJECT_INDEX.json'
+    if not should_regenerate(project_root, index_path):
+        print("PROJECT_INDEX.json is up to date, skipping refresh", file=sys.stderr)
+        return
+
     # Find the project_index.py script
     # First check if we're in the project itself
     local_script = project_root / 'scripts' / 'project_index.py'
@@ -44,6 +107,9 @@ def main():
     python_cmd_file = Path.home() / '.claude-code-project-index' / '.python_cmd'
     if python_cmd_file.exists():
         python_cmd = python_cmd_file.read_text().strip()
+        if not _validate_python_cmd(python_cmd):
+            print(f"Warning: Invalid Python command in .python_cmd: {python_cmd}", file=sys.stderr)
+            python_cmd = sys.executable  # Fallback to current interpreter
     else:
         # Try common Python commands
         for cmd in ['python3', 'python', 'python3.12', 'python3.11', 'python3.10', 'python3.9', 'python3.8']:
@@ -52,7 +118,7 @@ def main():
                 if result.returncode == 0:
                     python_cmd = cmd
                     break
-            except:
+            except (FileNotFoundError, PermissionError, OSError):
                 continue
         else:
             print("Warning: Could not find Python", file=sys.stderr)
@@ -60,9 +126,9 @@ def main():
     
     # Run the indexer silently
     try:
-        os.chdir(project_root)
         result = subprocess.run(
             [python_cmd, str(script_path)],
+            cwd=str(project_root),
             capture_output=True,
             text=True,
             timeout=10

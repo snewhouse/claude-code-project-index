@@ -156,6 +156,7 @@ chmod +x "$INSTALL_DIR/scripts/run_python.sh" 2>/dev/null || true
 
 # Save the Python command for later use
 echo "$PYTHON_CMD" > "$INSTALL_DIR/.python_cmd"
+chmod 600 "$INSTALL_DIR/.python_cmd"
 echo "   ✓ Python command saved: $PYTHON_CMD"
 
 # Create /index command
