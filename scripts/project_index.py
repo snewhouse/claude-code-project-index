@@ -88,7 +88,7 @@ def generate_tree_structure(root_path: Path, max_depth: int = MAX_TREE_DEPTH) ->
                     file_count = sum(1 for f in item.rglob('*') if f.is_file() and f.suffix in CODE_EXTENSIONS)
                     if file_count > 0:
                         name += f" ({file_count} files)"
-                except:
+                except (PermissionError, OSError):
                     pass
             
             tree_lines.append(prefix + current_prefix + name)
@@ -101,9 +101,6 @@ def generate_tree_structure(root_path: Path, max_depth: int = MAX_TREE_DEPTH) ->
     tree_lines.append(".")
     add_tree_level(root_path, "")
     return tree_lines
-
-
-# These functions are now imported from index_utils
 
 
 def build_index(root_dir: str) -> Tuple[Dict, int]:
@@ -397,8 +394,6 @@ def build_index(root_dir: str) -> Tuple[Dict, int]:
     
     return index, skipped_count
 
-
-# infer_file_purpose is now imported from index_utils
 
 
 def convert_to_enhanced_dense_format(index: Dict) -> Dict:

@@ -129,46 +129,17 @@ def extract_function_calls_javascript(body: str, all_functions: Set[str]) -> Lis
     return sorted(list(calls))
 
 
-def build_call_graph(functions: Dict, classes: Dict) -> Tuple[Dict, Dict]:
-    """Build bidirectional call graph from extracted functions and methods."""
-    calls_map = {}
-    called_by_map = {}
-    
-    # Build calls_map from functions
-    for func_name, func_info in functions.items():
-        if isinstance(func_info, dict) and 'calls' in func_info:
-            calls_map[func_name] = func_info['calls']
-    
-    # Build calls_map from class methods
-    for class_name, class_info in classes.items():
-        if isinstance(class_info, dict) and 'methods' in class_info:
-            for method_name, method_info in class_info['methods'].items():
-                if isinstance(method_info, dict) and 'calls' in method_info:
-                    full_method_name = f"{class_name}.{method_name}"
-                    calls_map[full_method_name] = method_info['calls']
-    
-    # Build the reverse index (called_by_map)
-    for func_name, called_funcs in calls_map.items():
-        for called_func in called_funcs:
-            if called_func not in called_by_map:
-                called_by_map[called_func] = []
-            if func_name not in called_by_map[called_func]:
-                called_by_map[called_func].append(func_name)
-    
-    return calls_map, called_by_map
-
 
 def extract_python_signatures(content: str) -> Dict[str, Dict]:
     """Extract Python function and class signatures with full details for all files."""
     result = {
         'imports': [],
-        'functions': {}, 
-        'classes': {}, 
-        'constants': {}, 
+        'functions': {},
+        'classes': {},
+        'constants': {},
         'variables': [],
         'type_aliases': {},
         'enums': {},
-        'call_graph': {}  # Track function calls for flow analysis
     }
     
     # Split into lines for line-by-line analysis
@@ -546,14 +517,13 @@ def extract_javascript_signatures(content: str) -> Dict[str, any]:
     """Extract JavaScript/TypeScript function and class signatures with full details."""
     result = {
         'imports': [],
-        'functions': {}, 
-        'classes': {}, 
-        'constants': {}, 
+        'functions': {},
+        'classes': {},
+        'constants': {},
         'variables': [],
         'type_aliases': {},
         'interfaces': {},
         'enums': {},
-        'call_graph': {}  # Track function calls for flow analysis
     }
     
     # Helper to convert character position to line number
@@ -925,6 +895,77 @@ def extract_function_calls_shell(body: str, all_functions: Set[str]) -> List[str
     return sorted(list(calls))
 
 
+def _parse_shell_function(func_name: str, doc: Optional[str], lines: List[str], start_line_idx: int, all_function_names: Set[str]) -> any:
+    """Parse a shell function body, extracting params, calls, and signature.
+
+    Shared implementation for both 'name() {' and 'function name {' styles.
+    """
+    # Try to find parameters from the function body
+    params = []
+    brace_count = 0
+    in_func_body = False
+
+    # Look for $1, $2, etc. usage in the function body only
+    for j in range(start_line_idx + 1, min(start_line_idx + 20, len(lines))):
+        line_content = lines[j].strip()
+
+        if '{' in line_content:
+            brace_count += line_content.count('{')
+            in_func_body = True
+        if '}' in line_content:
+            brace_count -= line_content.count('}')
+            if brace_count <= 0:
+                break
+
+        if in_func_body:
+            param_matches = re.findall(r'\$(\d+)', lines[j])
+            for p in param_matches:
+                param_num = int(p)
+                if param_num > 0 and param_num not in params:
+                    params.append(param_num)
+
+    # Build signature
+    if params:
+        max_param = max(params)
+        param_list = ' '.join(f'$1' if j == 1 else f'${{{j}}}' for j in range(1, max_param + 1))
+        signature = f"({param_list})"
+    else:
+        signature = "()"
+
+    # Extract function body for call analysis
+    func_body_lines = []
+    brace_count = 0
+    in_func_body = False
+    for j in range(start_line_idx + 1, len(lines)):
+        line_content = lines[j]
+        if '{' in line_content:
+            brace_count += line_content.count('{')
+            in_func_body = True
+        if in_func_body:
+            func_body_lines.append(line_content)
+        if '}' in line_content:
+            brace_count -= line_content.count('}')
+            if brace_count <= 0:
+                break
+
+    func_info = {}
+    if func_body_lines:
+        func_body = '\n'.join(func_body_lines)
+        calls = extract_function_calls_shell(func_body, all_function_names)
+        if calls:
+            func_info['calls'] = calls
+
+    if doc:
+        func_info['doc'] = doc
+
+    if func_info:
+        func_info['signature'] = signature
+    else:
+        func_info = signature
+
+    return func_info
+
+
 def extract_shell_signatures(content: str) -> Dict[str, any]:
     """Extract shell script function signatures and structure."""
     result = {
@@ -932,7 +973,6 @@ def extract_shell_signatures(content: str) -> Dict[str, any]:
         'variables': [],
         'exports': {},
         'sources': [],
-        'call_graph': {}  # Track function calls
     }
     
     lines = content.split('\n')
@@ -968,11 +1008,6 @@ def extract_shell_signatures(content: str) -> Dict[str, any]:
         r'^(?:source|\.)\s+([^\s]+)',  # Unquoted paths
     ]
     
-    # Track if we're in a function
-    in_function = False
-    current_function = None
-    function_start_line = -1
-    
     for i, line in enumerate(lines):
         stripped = line.strip()
         
@@ -980,158 +1015,19 @@ def extract_shell_signatures(content: str) -> Dict[str, any]:
         if not stripped or stripped.startswith('#!'):
             continue
             
-        # Check for function definition (style 1)
-        match = re.match(func_pattern1, stripped)
+        # Check for function definition (style 1: name() { or style 2: function name {)
+        match = re.match(func_pattern1, stripped) or re.match(func_pattern2, stripped)
         if match:
             func_name = match.group(1)
-            # Extract documentation comment if present
             doc = None
             if i > 0 and lines[i-1].strip().startswith('#'):
                 doc = lines[i-1].strip()[1:].strip()
-            
-            # Try to find parameters from the function body
-            params = []
-            brace_count = 0
-            in_func_body = False
-            
-            # Look for $1, $2, etc. usage in the function body only
-            for j in range(i+1, min(i+20, len(lines))):
-                line_content = lines[j].strip()
-                
-                # Track braces to know when we're in the function
-                if '{' in line_content:
-                    brace_count += line_content.count('{')
-                    in_func_body = True
-                if '}' in line_content:
-                    brace_count -= line_content.count('}')
-                    if brace_count <= 0:
-                        break  # End of function
-                
-                # Only look for parameters inside the function body
-                if in_func_body:
-                    param_matches = re.findall(r'\$(\d+)', lines[j])
-                    for p in param_matches:
-                        param_num = int(p)
-                        if param_num > 0 and param_num not in params:
-                            params.append(param_num)
-            
-            # Build signature
-            if params:
-                max_param = max(params)
-                param_list = ' '.join(f'$1' if j == 1 else f'${{{j}}}' for j in range(1, max_param + 1))
-                signature = f"({param_list})"
-            else:
-                signature = "()"
-            
-            # Extract function body for call analysis
-            func_body_lines = []
-            brace_count = 0
-            in_func_body = False
-            for j in range(i+1, len(lines)):
-                line_content = lines[j]
-                if '{' in line_content:
-                    brace_count += line_content.count('{')
-                    in_func_body = True
-                if in_func_body:
-                    func_body_lines.append(line_content)
-                if '}' in line_content:
-                    brace_count -= line_content.count('}')
-                    if brace_count <= 0:
-                        break
-            
-            func_info = {}
-            if func_body_lines:
-                func_body = '\n'.join(func_body_lines)
-                calls = extract_function_calls_shell(func_body, all_function_names)
-                if calls:
-                    func_info['calls'] = calls
-            
-            if doc:
-                func_info['doc'] = doc
-            
-            if func_info:
-                func_info['signature'] = signature
-                result['functions'][func_name] = func_info
-            else:
-                result['functions'][func_name] = signature
+
+            result['functions'][func_name] = _parse_shell_function(
+                func_name, doc, lines, i, all_function_names
+            )
             continue
-            
-        # Check for function definition (style 2)
-        match = re.match(func_pattern2, stripped)
-        if match:
-            func_name = match.group(1)
-            # Extract documentation comment if present
-            doc = None
-            if i > 0 and lines[i-1].strip().startswith('#'):
-                doc = lines[i-1].strip()[1:].strip()
-            
-            # Try to find parameters from the function body
-            params = []
-            brace_count = 0
-            in_func_body = False
-            
-            # Look for $1, $2, etc. usage in the function body only
-            for j in range(i+1, min(i+20, len(lines))):
-                line_content = lines[j].strip()
-                
-                # Track braces to know when we're in the function
-                if '{' in line_content:
-                    brace_count += line_content.count('{')
-                    in_func_body = True
-                if '}' in line_content:
-                    brace_count -= line_content.count('}')
-                    if brace_count <= 0:
-                        break  # End of function
-                
-                # Only look for parameters inside the function body
-                if in_func_body:
-                    param_matches = re.findall(r'\$(\d+)', lines[j])
-                    for p in param_matches:
-                        param_num = int(p)
-                        if param_num > 0 and param_num not in params:
-                            params.append(param_num)
-            
-            # Build signature
-            if params:
-                max_param = max(params)
-                param_list = ' '.join(f'$1' if j == 1 else f'${{{j}}}' for j in range(1, max_param + 1))
-                signature = f"({param_list})"
-            else:
-                signature = "()"
-            
-            # Extract function body for call analysis
-            func_body_lines = []
-            brace_count = 0
-            in_func_body = False
-            for j in range(i+1, len(lines)):
-                line_content = lines[j]
-                if '{' in line_content:
-                    brace_count += line_content.count('{')
-                    in_func_body = True
-                if in_func_body:
-                    func_body_lines.append(line_content)
-                if '}' in line_content:
-                    brace_count -= line_content.count('}')
-                    if brace_count <= 0:
-                        break
-            
-            func_info = {}
-            if func_body_lines:
-                func_body = '\n'.join(func_body_lines)
-                calls = extract_function_calls_shell(func_body, all_function_names)
-                if calls:
-                    func_info['calls'] = calls
-            
-            if doc:
-                func_info['doc'] = doc
-            
-            if func_info:
-                func_info['signature'] = signature
-                result['functions'][func_name] = func_info
-            else:
-                result['functions'][func_name] = signature
-            continue
-        
+
         # Check for exports
         match = re.match(export_pattern, stripped)
         if match:
@@ -1187,7 +1083,7 @@ def extract_markdown_structure(file_path: Path) -> Dict[str, List[str]]:
     """Extract headers and architectural hints from markdown files."""
     try:
         content = file_path.read_text(encoding='utf-8', errors='ignore')
-    except:
+    except (OSError, UnicodeDecodeError):
         return {'sections': [], 'architecture_hints': []}
     
     # Extract headers (up to level 3)
@@ -1292,9 +1188,9 @@ def parse_gitignore(gitignore_path: Path) -> List[str]:
                 if not line or line.startswith('#'):
                     continue
                 patterns.append(line)
-    except:
+    except (OSError, UnicodeDecodeError):
         pass
-    
+
     return patterns
 
 

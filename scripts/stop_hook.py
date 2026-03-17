@@ -77,7 +77,7 @@ def main():
                 if result.returncode == 0:
                     python_cmd = cmd
                     break
-            except:
+            except (FileNotFoundError, PermissionError, OSError):
                 continue
         else:
             print("Warning: Could not find Python", file=sys.stderr)

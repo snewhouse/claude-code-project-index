@@ -10,6 +10,7 @@ import os
 import re
 import subprocess
 import hashlib
+import tempfile
 import time
 from pathlib import Path
 from datetime import datetime
@@ -81,9 +82,9 @@ def get_last_interactive_size():
                 if last_size:
                     print(f"📝 Using remembered size: {last_size}k", file=sys.stderr)
                     return last_size
-    except:
+    except Exception:
         pass
-    
+
     # Fall back to default
     return DEFAULT_SIZE_K
 
@@ -154,7 +155,7 @@ def calculate_files_hash(project_root):
                 try:
                     mtime = str(full_path.stat().st_mtime)
                     hasher.update(f"{file_path}:{mtime}".encode())
-                except:
+                except (OSError, ValueError):
                     pass
         
         return hasher.hexdigest()[:16]
@@ -351,9 +352,15 @@ Focus on providing actionable file locations and insights."""
         
         # For SSH sessions, try OSC 52 or other methods
         if is_ssh:
-            fallback_path = Path.cwd() / '.clipboard_content.txt'
-            with open(fallback_path, 'w') as f:
-                f.write(clipboard_content)
+            fd, fallback_path_str = tempfile.mkstemp(
+                prefix='.clipboard_content_', suffix='.txt', dir=str(Path.cwd())
+            )
+            try:
+                os.write(fd, clipboard_content.encode('utf-8'))
+                os.fchmod(fd, 0o600)
+            finally:
+                os.close(fd)
+            fallback_path = Path(fallback_path_str)
             
             # Import base64 at the beginning for all methods
             import base64
@@ -382,7 +389,7 @@ Focus on providing actionable file locations and insights."""
                             result = subprocess.run(['tmux', 'display-message', '-p', '#{client_tty}'],
                                                   capture_output=True, text=True, check=True)
                             tty_device = result.stdout.strip()
-                        except:
+                        except (subprocess.SubprocessError, OSError):
                             tty_device = "/dev/tty"
                     else:
                         tty_device = "/dev/tty"
@@ -423,7 +430,7 @@ Focus on providing actionable file locations and insights."""
                     proc.communicate(clipboard_content.encode('utf-8'))
                     if proc.returncode == 0:
                         print(f"✅ Loaded into tmux buffer", file=sys.stderr)
-                except:
+                except (OSError, subprocess.SubprocessError):
                     pass
 
                 print(f"", file=sys.stderr)
@@ -438,7 +445,7 @@ Focus on providing actionable file locations and insights."""
                 proc.communicate(clipboard_content.encode('utf-8'))
                 if proc.returncode == 0:
                     print(f"✅ Loaded into tmux buffer (use prefix + ] to paste)", file=sys.stderr)
-            except:
+            except (OSError, subprocess.SubprocessError):
                 pass
             
             print(f"📁 Full content saved to {fallback_path}", file=sys.stderr)
@@ -474,7 +481,7 @@ Focus on providing actionable file locations and insights."""
                     print(f"✅ Copied to clipboard via xclip: {len(clipboard_content)} chars", file=sys.stderr)
                     print(f"📋 Ready to paste into Gemini, Claude.ai, ChatGPT, or other AI", file=sys.stderr)
                     return ('clipboard', len(clipboard_content))
-        except:
+        except Exception:
             pass
         
         # Fallback to pyperclip if xclip didn't work
@@ -490,11 +497,16 @@ Focus on providing actionable file locations and insights."""
         
         # Final fallback to file if clipboard methods failed
         if not clipboard_success:
-            fallback_path = Path.cwd() / '.clipboard_content.txt'
-            with open(fallback_path, 'w') as f:
-                f.write(clipboard_content)
-            print(f"✅ Saved to {fallback_path} (copy manually)", file=sys.stderr)
-            return ('file', str(fallback_path))
+            fd, fallback_path_str = tempfile.mkstemp(
+                prefix='.clipboard_content_', suffix='.txt', dir=str(Path.cwd())
+            )
+            try:
+                os.write(fd, clipboard_content.encode('utf-8'))
+                os.fchmod(fd, 0o600)
+            finally:
+                os.close(fd)
+            print(f"✅ Saved to {fallback_path_str} (copy manually)", file=sys.stderr)
+            return ('file', fallback_path_str)
     except Exception as e:
         print(f"⚠️ Error preparing clipboard content: {e}", file=sys.stderr)
         return ('error', str(e))
