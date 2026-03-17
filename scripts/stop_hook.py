@@ -6,9 +6,31 @@ This ensures the index captures any changes made during the session.
 
 import json
 import sys
-import os
 import subprocess
 from pathlib import Path
+
+
+def _validate_python_cmd(cmd_path: str) -> bool:
+    """Validate that a python command path is safe to execute."""
+    import os
+    from pathlib import Path as _Path
+
+    path = _Path(cmd_path)
+
+    # Must be an absolute path
+    if not path.is_absolute():
+        return False
+
+    # Must exist and be executable
+    if not path.exists() or not os.access(str(path), os.X_OK):
+        return False
+
+    # Basename must look like a Python interpreter
+    basename = path.name
+    if not (basename.startswith('python') or basename == 'python3'):
+        return False
+
+    return True
 
 
 def main():
@@ -44,6 +66,9 @@ def main():
     python_cmd_file = Path.home() / '.claude-code-project-index' / '.python_cmd'
     if python_cmd_file.exists():
         python_cmd = python_cmd_file.read_text().strip()
+        if not _validate_python_cmd(python_cmd):
+            print(f"Warning: Invalid Python command in .python_cmd: {python_cmd}", file=sys.stderr)
+            python_cmd = sys.executable  # Fallback to current interpreter
     else:
         # Try common Python commands
         for cmd in ['python3', 'python', 'python3.12', 'python3.11', 'python3.10', 'python3.9', 'python3.8']:
@@ -60,9 +85,9 @@ def main():
     
     # Run the indexer silently
     try:
-        os.chdir(project_root)
         result = subprocess.run(
             [python_cmd, str(script_path)],
+            cwd=str(project_root),
             capture_output=True,
             text=True,
             timeout=10

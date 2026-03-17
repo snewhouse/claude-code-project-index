@@ -20,6 +20,30 @@ MIN_SIZE_K = 1       # Minimum 1k tokens
 CLAUDE_MAX_K = 100   # Max 100k for Claude (leaves room for reasoning)
 EXTERNAL_MAX_K = 800 # Max 800k for external AI
 
+
+def _validate_python_cmd(cmd_path: str) -> bool:
+    """Validate that a python command path is safe to execute."""
+    import os
+    from pathlib import Path
+
+    path = Path(cmd_path)
+
+    # Must be an absolute path
+    if not path.is_absolute():
+        return False
+
+    # Must exist and be executable
+    if not path.exists() or not os.access(str(path), os.X_OK):
+        return False
+
+    # Basename must look like a Python interpreter
+    basename = path.name
+    if not (basename.startswith('python') or basename == 'python3'):
+        return False
+
+    return True
+
+
 def find_project_root():
     """Find project root by looking for .git or common project markers."""
     current = Path.cwd()
@@ -189,6 +213,9 @@ def generate_index_at_size(project_root, target_size_k, is_clipboard_mode=False)
         python_cmd_file = Path.home() / '.claude-code-project-index' / '.python_cmd'
         if python_cmd_file.exists():
             python_cmd = python_cmd_file.read_text().strip()
+            if not _validate_python_cmd(python_cmd):
+                print(f"⚠️ Invalid Python command in .python_cmd: {python_cmd}", file=sys.stderr)
+                python_cmd = sys.executable  # Fallback to current interpreter
         else:
             python_cmd = sys.executable
         
@@ -259,61 +286,6 @@ def generate_index_at_size(project_root, target_size_k, is_clipboard_mode=False)
 def copy_to_clipboard(prompt, index_path):
     """Copy prompt, instructions, and index to clipboard for external AI."""
     try:
-        # Try VM Bridge first (works with any size over mosh)
-        vm_bridge_available = False
-        bridge_client = None
-        
-        try:
-            import sys
-            # Try multiple VM Bridge locations in order of preference
-            vm_bridge_paths = [
-                os.path.expanduser('~/.claude-ericbuess/tools/vm-bridge'),  # New standard location
-                '/home/ericbuess/Projects/vm-bridge',  # Legacy project location
-                os.path.expanduser('~/.local/lib/python/vm_bridge')  # Old tunnel location
-            ]
-            
-            # Try network version first (no tunnel needed)
-            for bridge_path in vm_bridge_paths:
-                if os.path.exists(bridge_path):
-                    sys.path.insert(0, bridge_path)
-                    try:
-                        from vm_client_network import VMBridgeClient as NetworkClient
-                        
-                        # Try to auto-detect or use known Mac IP
-                        for mac_ip in ['10.211.55.2', '10.211.55.1', '192.168.1.1']:
-                            try:
-                                test_client = NetworkClient(host=mac_ip)
-                                if test_client.is_daemon_running():
-                                    bridge_client = test_client
-                                    print(f"🌉 VM Bridge network daemon detected at {mac_ip}", file=sys.stderr)
-                                    vm_bridge_available = True
-                                    break
-                            except:
-                                continue
-                        
-                        if vm_bridge_available:
-                            break
-                    except ImportError:
-                        # Try next path
-                        continue
-                    
-            # Fall back to localhost tunnel version if network not available
-            if not vm_bridge_available:
-                for bridge_path in vm_bridge_paths:
-                    if os.path.exists(bridge_path):
-                        sys.path.insert(0, bridge_path)
-                        try:
-                            from vm_client import VMBridgeClient
-                            bridge_client = VMBridgeClient()
-                            if bridge_client.is_daemon_running():
-                                print("🌉 VM Bridge tunnel daemon detected", file=sys.stderr)
-                                vm_bridge_available = True
-                                break
-                        except ImportError:
-                            continue
-                    
-        except ImportError:
-            vm_bridge_available = False
         # Create clipboard-specific instructions (no tools, no subagent references)
         clipboard_instructions = """You are analyzing a codebase index to help identify relevant files and code sections.
 
@@ -373,28 +345,7 @@ Focus on providing actionable file locations and insights."""
         
         # Try to copy to clipboard
         clipboard_success = False
-        
-        # Try VM Bridge first if available (works with any size over mosh)
-        if vm_bridge_available:
-            try:
-                if bridge_client.copy_to_clipboard(clipboard_content):
-                    print(f"✅ Copied to Mac clipboard via VM Bridge ({len(clipboard_content)} chars)", file=sys.stderr)
-                    print(f"🌉 No size limits with VM Bridge!", file=sys.stderr)
-                    
-                    # Also notify on Mac
-                    bridge_client.notify(f"Clipboard updated: {len(clipboard_content)} chars from VM")
-                    
-                    # Save to file as backup
-                    fallback_path = Path.cwd() / '.clipboard_content.txt'
-                    with open(fallback_path, 'w') as f:
-                        f.write(clipboard_content)
-                    print(f"📁 Also saved to {fallback_path} as backup", file=sys.stderr)
-                    
-                    return ('vm_bridge', len(clipboard_content))
-            except Exception as e:
-                print(f"⚠️ VM Bridge failed: {e}", file=sys.stderr)
-                # Fall through to other methods
-        
+
         # Check if we're in an SSH session (clipboard won't work across SSH)
         is_ssh = os.environ.get('SSH_CONNECTION') or os.environ.get('SSH_CLIENT')
         
@@ -472,28 +423,13 @@ Focus on providing actionable file locations and insights."""
                     proc.communicate(clipboard_content.encode('utf-8'))
                     if proc.returncode == 0:
                         print(f"✅ Loaded into tmux buffer", file=sys.stderr)
-                        
-                        # Try to trigger automatic Mac clipboard sync
-                        # This runs a command on the tmux client (Mac) side
-                        sync_cmd = f"ssh {os.environ.get('USER', 'user')}@10.211.55.4 'cat ~/Projects/claude-code-project-index/.clipboard_content.txt' | pbcopy"
-                        tmux_run = f"tmux run-shell '{sync_cmd}'"
-                        
-                        try:
-                            subprocess.run(['tmux', 'run-shell', sync_cmd], 
-                                         capture_output=True, timeout=2)
-                            print(f"🚀 Attempting automatic clipboard sync to Mac...", file=sys.stderr)
-                        except:
-                            pass
                 except:
                     pass
-                
-                print(f"", file=sys.stderr)
-                print(f"To manually copy to Mac clipboard, run this on your Mac:", file=sys.stderr)
-                print(f"   ssh {os.environ.get('USER', 'user')}@10.211.55.4 'cat ~/Projects/claude-code-project-index/.clipboard_content.txt' | pbcopy", file=sys.stderr)
+
                 print(f"", file=sys.stderr)
                 print(f"ℹ️  Mosh/tmux limits clipboard to ~12KB. For larger content, consider:", file=sys.stderr)
                 print(f"   - Using SSH instead of mosh for this operation", file=sys.stderr)
-                print(f"   - Or using the manual command above", file=sys.stderr)
+                print(f"   - Or saving .clipboard_content.txt and copying manually", file=sys.stderr)
             
             # Also try tmux buffer for local pasting
             try:
@@ -595,32 +531,7 @@ def main():
         # Handle clipboard mode
         if clipboard_mode:
             copy_result = copy_to_clipboard(cleaned_prompt, index_path)
-            if copy_result[0] == 'vm_bridge':
-                # Successfully copied via VM Bridge
-                output = {
-                    "hookSpecificOutput": {
-                        "hookEventName": "UserPromptSubmit",
-                        "additionalContext": f"""
-🌉 Clipboard Mode - VM Bridge Success!
-
-✅ Index copied to Mac clipboard via VM Bridge ({copy_result[1]} chars).
-🚀 No size limits with this method!
-📁 Also saved to: .clipboard_content.txt
-
-Paste directly into external AI (Gemini, Claude.ai, ChatGPT) for analysis.
-
-**CRITICAL INSTRUCTION FOR CLAUDE**: STOP! Do NOT proceed with the original request. The user wants to use an external AI for analysis. You should:
-1. ONLY acknowledge that the content was copied to clipboard
-2. WAIT for the user to paste the external AI's response
-3. DO NOT attempt to answer or work on: "{cleaned_prompt}"
-
-Simply respond with something like: "✅ Index copied to clipboard for external AI analysis. Please paste the response here when ready."
-
-User's request (DO NOT ANSWER): {cleaned_prompt}
-"""
-                    }
-                }
-            elif copy_result[0] == 'clipboard':
+            if copy_result[0] == 'clipboard':
                 # Successfully copied to clipboard
                 output = {
                     "hookSpecificOutput": {
@@ -675,10 +586,10 @@ User's request (DO NOT ANSWER): {cleaned_prompt}
 📋 Clipboard Mode - Content Too Large for Auto-Copy
 
 Index saved to: {copy_result[1]} ({size_k}k tokens).
-⚠️ Content exceeds mosh/OSC 52 limit (7.5KB) for automatic clipboard.
+⚠️ Content exceeds mosh/OSC 52 limit for automatic clipboard.
 
-To copy the full index to your Mac clipboard, run this command on your Mac:
-ssh {os.environ.get('USER', 'user')}@10.211.55.4 'cat ~/Projects/claude-code-project-index/.clipboard_content.txt' | pbcopy
+Copy the file manually: cat {copy_result[1]} | pbcopy  # macOS
+                         cat {copy_result[1]} | xclip   # Linux
 
 Then paste into external AI (Gemini, Claude.ai, ChatGPT) for analysis.
 
