@@ -27,7 +27,7 @@ from typing import Dict, List, Optional, Tuple
 # Import shared utilities
 from index_utils import (
     IGNORE_DIRS, PARSEABLE_LANGUAGES, CODE_EXTENSIONS, MARKDOWN_EXTENSIONS,
-    DIRECTORY_PURPOSES, extract_python_signatures, extract_javascript_signatures,
+    DIRECTORY_PURPOSES, extract_javascript_signatures,
     extract_shell_signatures, extract_markdown_structure, infer_file_purpose,
     infer_directory_purpose, get_language_name, should_index_file, parse_file,
     atomic_write_json,

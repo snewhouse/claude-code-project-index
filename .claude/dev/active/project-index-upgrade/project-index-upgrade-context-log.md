@@ -55,6 +55,13 @@ Seven research reports were analyzed from the `codebase-deep-dive-20260317-09493
 - Tests: 54 pass (46 original + 8 new)
 - Notable: The tightened basename regex `python\d*(\.\d+)?` is stricter than the original `startswith('python')` check, properly rejecting paths like `python3-malicious`
 
+## 2026-03-17 Milestone 4 Completion: Python AST Parser
+- Status: COMPLETE
+- Key outcome: Implemented extract_python_signatures_ast using Python's ast module for 100% accurate parsing. Feature flag V2_AST_PARSER controls selection, SyntaxError falls back to regex parser. Output format compatible with dense format conversion.
+- Artifacts: Created tests/test_ast_parser.py (13 tests). Modified scripts/index_utils.py (added AST parser), scripts/project_index.py (removed dead import), tests/test_registry.py (+1 test).
+- Tests: 93 pass (79 from M3 + 14 new)
+- Decision: PARSER_REGISTRY['.py'] still points to regex parser. AST selection happens at parse_file() call time via env var check. This keeps backward compatibility and allows per-test toggling.
+
 ## 2026-03-17 Milestone 3 Completion: God Function Decomposition
 - Status: COMPLETE
 - Key outcome: Decomposed 5 god functions (381, 358, 283, 122, 111 lines) into 18 focused helpers. No function exceeds 100 lines. Pure refactoring — all tests pass unchanged.

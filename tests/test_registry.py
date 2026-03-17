@@ -1,4 +1,5 @@
 """Tests for parser registry and architecture improvements."""
+import os
 import sys
 from pathlib import Path
 
@@ -39,6 +40,15 @@ def test_parse_file_returns_none_for_unknown():
     from index_utils import parse_file
     result = parse_file("some content", '.xyz')
     assert result is None
+
+
+def test_parse_file_uses_ast_by_default():
+    """parse_file uses AST parser for .py when V2_AST_PARSER is not 0."""
+    from index_utils import parse_file
+    os.environ.pop('V2_AST_PARSER', None)
+    result = parse_file("def foo(): pass", '.py')
+    assert result is not None
+    assert 'functions' in result
 
 
 def test_dense_format_uses_constants():

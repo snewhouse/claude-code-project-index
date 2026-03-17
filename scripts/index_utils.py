@@ -4,6 +4,7 @@ Shared utilities for project indexing.
 Contains common functionality used by both project_index.py and hook scripts.
 """
 
+import ast
 import json
 import os
 import re
@@ -572,6 +573,274 @@ def _parse_python_class_body(line: str, result: Dict, pat: Dict,
 
 _SKIP_DUNDER = {'__repr__', '__str__', '__hash__', '__eq__', '__ne__',
                 '__lt__', '__le__', '__gt__', '__ge__', '__bool__'}
+
+
+def extract_python_signatures_ast(content: str) -> Dict[str, Dict]:
+    """Extract Python function and class signatures using the ast module.
+
+    Uses Python's ast module for accurate parsing. Falls back to the regex-based
+    extract_python_signatures() on SyntaxError.
+
+    Returns the same dict format as extract_python_signatures():
+        {imports, functions, classes, constants, variables, type_aliases, enums}
+    """
+    try:
+        tree = ast.parse(content)
+    except SyntaxError:
+        return extract_python_signatures(content)
+
+    result: Dict[str, Any] = {
+        'imports': [],
+        'functions': {},
+        'classes': {},
+        'constants': {},
+        'variables': [],
+        'type_aliases': {},
+        'enums': {},
+    }
+
+    def _unparse_safe(node) -> str:
+        """Safely unparse an AST node to source string."""
+        try:
+            return ast.unparse(node)
+        except Exception:
+            return ''
+
+    def _get_decorator_names(decorator_list) -> List[str]:
+        """Extract decorator names from a list of decorator nodes."""
+        names = []
+        for dec in decorator_list:
+            if isinstance(dec, ast.Name):
+                names.append(dec.id)
+            elif isinstance(dec, ast.Attribute):
+                names.append(_unparse_safe(dec))
+            elif isinstance(dec, ast.Call):
+                if isinstance(dec.func, ast.Name):
+                    names.append(dec.func.id)
+                elif isinstance(dec.func, ast.Attribute):
+                    names.append(_unparse_safe(dec.func))
+        return names
+
+    def _build_signature(node) -> str:
+        """Build a function signature string from an ast.FunctionDef node."""
+        params = []
+        args = node.args
+
+        # Calculate offset for defaults alignment
+        # positional args: defaults align to the end of args.args
+        num_args = len(args.args)
+        num_defaults = len(args.defaults)
+        default_offset = num_args - num_defaults
+
+        for idx, arg in enumerate(args.args):
+            param = arg.arg
+            if param == 'self' or param == 'cls':
+                continue
+            if arg.annotation:
+                param += ': ' + _unparse_safe(arg.annotation)
+            di = idx - default_offset
+            if di >= 0 and di < len(args.defaults):
+                param += ' = ' + _unparse_safe(args.defaults[di])
+            params.append(param)
+
+        # *args
+        if args.vararg:
+            p = '*' + args.vararg.arg
+            if args.vararg.annotation:
+                p += ': ' + _unparse_safe(args.vararg.annotation)
+            params.append(p)
+
+        # keyword-only args
+        for idx, arg in enumerate(args.kwonlyargs):
+            param = arg.arg
+            if arg.annotation:
+                param += ': ' + _unparse_safe(arg.annotation)
+            if idx < len(args.kw_defaults) and args.kw_defaults[idx] is not None:
+                param += ' = ' + _unparse_safe(args.kw_defaults[idx])
+            params.append(param)
+
+        # **kwargs
+        if args.kwarg:
+            p = '**' + args.kwarg.arg
+            if args.kwarg.annotation:
+                p += ': ' + _unparse_safe(args.kwarg.annotation)
+            params.append(p)
+
+        sig = '(' + ', '.join(params) + ')'
+        if node.returns:
+            sig += ' -> ' + _unparse_safe(node.returns)
+
+        # Prefix async
+        if isinstance(node, ast.AsyncFunctionDef):
+            sig = 'async ' + sig
+
+        return sig
+
+    def _extract_calls(body_nodes, all_func_names: Set[str]) -> List[str]:
+        """Extract function call names from AST body nodes."""
+        calls = set()
+        exclude = {
+            'print', 'len', 'str', 'int', 'float', 'bool', 'list', 'dict',
+            'set', 'tuple', 'type', 'isinstance', 'issubclass', 'super',
+            'range', 'enumerate', 'zip', 'map', 'filter', 'sorted',
+            'reversed', 'open', 'input', 'eval',
+        }
+        for node in ast.walk(ast.Module(body=body_nodes, type_ignores=[])):
+            if isinstance(node, ast.Call):
+                if isinstance(node.func, ast.Name):
+                    name = node.func.id
+                    if name in all_func_names and name not in exclude:
+                        calls.add(name)
+                elif isinstance(node.func, ast.Attribute):
+                    name = node.func.attr
+                    if name in all_func_names:
+                        calls.add(name)
+        return sorted(calls)
+
+    def _process_function(node, all_func_names: Set[str]) -> Dict:
+        """Process a FunctionDef/AsyncFunctionDef node into a result dict."""
+        info: Dict[str, Any] = {
+            'signature': _build_signature(node),
+            'line': node.lineno,
+        }
+        doc = ast.get_docstring(node)
+        if doc:
+            # Truncate long docstrings to first line
+            first_line = doc.split('\n')[0].strip()
+            info['doc'] = first_line
+
+        decorators = _get_decorator_names(node.decorator_list)
+        if decorators:
+            info['decorators'] = decorators
+
+        calls = _extract_calls(node.body, all_func_names)
+        if calls:
+            info['calls'] = calls
+
+        return info
+
+    # First pass: collect all function names for call graph resolution
+    all_function_names: Set[str] = set()
+    for node in ast.walk(tree):
+        if isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            all_function_names.add(node.name)
+
+    # Second pass: extract structure from top-level nodes only
+    for node in tree.body:
+        # Imports
+        if isinstance(node, ast.Import):
+            for alias in node.names:
+                result['imports'].append(alias.name)
+        elif isinstance(node, ast.ImportFrom):
+            if node.module:
+                result['imports'].append(node.module)
+
+        # Top-level functions (not nested)
+        elif isinstance(node, (ast.FunctionDef, ast.AsyncFunctionDef)):
+            result['functions'][node.name] = _process_function(node, all_function_names)
+
+        # Classes
+        elif isinstance(node, ast.ClassDef):
+            cls_info: Dict[str, Any] = {
+                'methods': {},
+                'line': node.lineno,
+            }
+            doc = ast.get_docstring(node)
+            if doc:
+                cls_info['doc'] = doc.split('\n')[0].strip()
+
+            # Inheritance
+            bases = [_unparse_safe(b) for b in node.bases if _unparse_safe(b)]
+            if bases:
+                cls_info['inherits'] = bases
+
+            # Decorators
+            decorators = _get_decorator_names(node.decorator_list)
+            if decorators:
+                cls_info['decorators'] = decorators
+
+            # Detect enum
+            is_enum = any(b in ('Enum', 'IntEnum', 'StrEnum', 'Flag', 'IntFlag')
+                          for b in bases)
+            if is_enum:
+                cls_info['type'] = 'enum'
+
+            # Class body
+            class_constants: Dict[str, str] = {}
+            properties: List[str] = []
+            enum_values: List[str] = []
+
+            for item in node.body:
+                if isinstance(item, (ast.FunctionDef, ast.AsyncFunctionDef)):
+                    cls_info['methods'][item.name] = _process_function(item, all_function_names)
+                elif isinstance(item, ast.Assign):
+                    for target in item.targets:
+                        if isinstance(target, ast.Name):
+                            name = target.id
+                            if is_enum and not name.startswith('_'):
+                                enum_values.append(name)
+                            elif name.isupper():
+                                class_constants[name] = _infer_const_type(_unparse_safe(item.value))
+                            elif not name.startswith('_'):
+                                properties.append(name)
+                elif isinstance(item, ast.AnnAssign) and isinstance(item.target, ast.Name):
+                    name = item.target.id
+                    if not name.startswith('_'):
+                        properties.append(name)
+
+            if class_constants:
+                cls_info['class_constants'] = class_constants
+            if properties:
+                cls_info['properties'] = properties
+            if enum_values:
+                cls_info['values'] = enum_values
+
+            result['classes'][node.name] = cls_info
+
+        # Module-level constants and variables
+        elif isinstance(node, ast.Assign):
+            for target in node.targets:
+                if isinstance(target, ast.Name):
+                    name = target.id
+                    if name.isupper():
+                        result['constants'][name] = _infer_const_type(_unparse_safe(node.value))
+                    elif not name.startswith('_'):
+                        result['variables'].append(name)
+
+        # Type aliases (Python 3.12 style or simple assignments)
+        elif isinstance(node, ast.AnnAssign) and isinstance(node.target, ast.Name):
+            name = node.target.id
+            if name.isupper():
+                result['constants'][name] = _infer_const_type(
+                    _unparse_safe(node.value) if node.value else 'value')
+            elif not name.startswith('_'):
+                result['variables'].append(name)
+
+    # Cleanup: remove empty collections (match regex parser output format)
+    if not result['constants']:
+        del result['constants']
+    if not result['variables']:
+        del result['variables']
+    if not result['type_aliases']:
+        del result['type_aliases']
+    if not result['enums']:
+        del result['enums']
+    if not result['imports']:
+        del result['imports']
+
+    # Move enum classes to enums section
+    enums_to_move = {}
+    for class_name, class_info in list(result['classes'].items()):
+        if class_info.get('type') == 'enum':
+            enums_to_move[class_name] = {
+                'values': class_info.get('values', []),
+                'doc': class_info.get('doc', '')
+            }
+            del result['classes'][class_name]
+    if enums_to_move:
+        result['enums'] = enums_to_move
+
+    return result
 
 
 def extract_python_signatures(content: str) -> Dict[str, Dict]:
@@ -1274,10 +1543,14 @@ def parse_file(content: str, extension: str) -> Optional[Dict]:
     """Parse a file using the registered parser for its extension.
 
     Returns parsed result dict or None if no parser registered.
+    For Python files, uses AST parser by default (controlled by V2_AST_PARSER env var).
     """
     parser = PARSER_REGISTRY.get(extension)
     if parser is None:
         return None
+    # Feature flag: V2_AST_PARSER controls Python parser selection at call time
+    if extension == '.py' and os.environ.get('V2_AST_PARSER', '1') != '0':
+        return extract_python_signatures_ast(content)
     return parser(content)
 
 

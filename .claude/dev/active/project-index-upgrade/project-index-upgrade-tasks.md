@@ -138,7 +138,7 @@ _Hierarchical Task Planning roadmap with dependencies and state tracking._
 ---
 
 ## Milestone 4: Python AST Parser
-- **Status:** PENDING
+- **Status:** COMPLETE
 - **Dependencies:** Milestone 1, Milestone 2, Milestone 3
 - **Complexity:** 70%
 - **Effort:** 3-4 hours
@@ -151,19 +151,19 @@ _Hierarchical Task Planning roadmap with dependencies and state tracking._
   - New tests for: nested functions, complex defaults, generics, async, decorators, dataclasses
   - Minimum Python version: 3.9 (for `ast.unparse()`)
   - Output format compatible with existing dense format conversion
+- **Result Log:** All 8 acceptance criteria verified. 93 tests pass (79 from M3 + 14 new). extract_python_signatures_ast implemented using ast.parse + ast walking. Feature flag V2_AST_PARSER controls selection at call time in parse_file(). SyntaxError falls back to regex. Dense format compatibility verified.
 
 ### Step 4.1: Write comprehensive failing tests for AST parser
-- **Status:** PENDING
+- **Status:** COMPLETE
 - **Dependencies:** Milestone 3
-- **Files:** `tests/test_ast_parser.py` (create)
-- **Result Log:**
+- **Files:** `tests/test_ast_parser.py` (created)
+- **Result Log:** 13 tests created covering: simple functions, classes with methods, async, decorators, nested functions, complex defaults, dataclasses, imports, constants, feature flag, SyntaxError fallback, inheritance, enums.
 
 ### Step 4.2: Implement AstPythonParser and register in PARSER_REGISTRY
-- **Status:** PENDING
+- **Status:** COMPLETE
 - **Dependencies:** Step 4.1
-- **Files:** `scripts/index_utils.py` (add AstPythonParser class, extract_python_signatures_ast function, update PARSER_REGISTRY), `tests/test_registry.py:12` (update __name__ assertion), `scripts/project_index.py:30` (remove dead extract_python_signatures import)
-- **Verification Finding:** test_registry.py asserts `PARSER_REGISTRY['.py'].__name__ == 'extract_python_signatures'` — must update to match AST parser name
-- **Result Log:**
+- **Files:** `scripts/index_utils.py` (added extract_python_signatures_ast), `tests/test_registry.py` (added test_parse_file_uses_ast_by_default), `scripts/project_index.py` (removed dead extract_python_signatures import)
+- **Result Log:** AST parser uses ast.parse+walking, ast.unparse for signatures, ast.get_docstring for docs. Feature flag in parse_file() selects AST vs regex at call time. PARSER_REGISTRY unchanged (still maps .py to regex). Removed unused import from project_index.py.
 
 ---
 
