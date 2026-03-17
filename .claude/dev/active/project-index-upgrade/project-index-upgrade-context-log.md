@@ -55,6 +55,12 @@ Seven research reports were analyzed from the `codebase-deep-dive-20260317-09493
 - Tests: 54 pass (46 original + 8 new)
 - Notable: The tightened basename regex `python\d*(\.\d+)?` is stricter than the original `startswith('python')` check, properly rejecting paths like `python3-malicious`
 
+## 2026-03-17 Milestone 7 Completion: Query Engine + MCP Server
+- Status: COMPLETE
+- Key outcome: Created QueryEngine with 6 structural query methods, CLI with argparse, and optional MCP server (FastMCP guard). All tools work against both verbose and dense index formats.
+- Artifacts: Created scripts/query_engine.py, scripts/cli.py, scripts/mcp_server.py, tests/test_query_engine.py (10 tests).
+- Tests: 122 pass (112 from M6 + 10 new)
+
 ## 2026-03-17 Milestone 6 Completion: Incremental Indexing
 - Status: COMPLETE
 - Key outcome: Created SQLite-backed cache (cache_db.py) with two-tier dirty detection, version invalidation, and corrupt-db recovery. Integrated into project_index.py via --incremental flag. Second run shows 28/29 cache hits.

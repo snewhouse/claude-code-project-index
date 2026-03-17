@@ -232,7 +232,7 @@ _Hierarchical Task Planning roadmap with dependencies and state tracking._
 ---
 
 ## Milestone 7: Query Engine + MCP Server
-- **Status:** PENDING
+- **Status:** COMPLETE
 - **Dependencies:** Milestone 5, Milestone 6
 - **Complexity:** 60%
 - **Effort:** 5-6 hours
@@ -242,24 +242,25 @@ _Hierarchical Task Planning roadmap with dependencies and state tracking._
   - CLI: `python3 cli.py query who-calls <symbol> [depth]`
   - MCP server (optional): FastMCP 2.2.x with stdio transport
   - `readOnlyHint: true` on all MCP tools
+- **Result Log:** All 5 acceptance criteria verified. 122 tests pass (112 from M6 + 10 new). QueryEngine with 6 methods, CLI with argparse, MCP server with FastMCP guard. CLI verified working against live index.
 
 ### Step 7.1: Query engine core
-- **Status:** PENDING
+- **Status:** COMPLETE
 - **Dependencies:** Milestone 5, Milestone 6
-- **Files:** `scripts/query_engine.py` (create), `tests/test_query_engine.py` (create)
-- **Result Log:**
+- **Files:** `scripts/query_engine.py` (created), `tests/test_query_engine.py` (created)
+- **Result Log:** QueryEngine class with who_calls (transitive), blast_radius (depth-limited), dead_code, dependency_chain, search_symbols (regex), file_summary. Handles both verbose and dense index formats. 10 tests.
 
 ### Step 7.2: CLI interface
-- **Status:** PENDING
+- **Status:** COMPLETE
 - **Dependencies:** Step 7.1
-- **Files:** `scripts/cli.py` (create)
-- **Result Log:**
+- **Files:** `scripts/cli.py` (created)
+- **Result Log:** argparse-based CLI with query subcommands. Auto-discovers PROJECT_INDEX.json by searching up from CWD. JSON output.
 
 ### Step 7.3: MCP server (optional)
-- **Status:** PENDING
+- **Status:** COMPLETE
 - **Dependencies:** Step 7.1
-- **Files:** `scripts/mcp_server.py` (create)
-- **Result Log:**
+- **Files:** `scripts/mcp_server.py` (created)
+- **Result Log:** FastMCP wrapper with HAS_FASTMCP guard. 6 tools with readOnlyHint in docstrings. stdio transport. Graceful error when FastMCP not installed.
 
 ---
 
