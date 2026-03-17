@@ -24,7 +24,6 @@ Thumbs.db
 *_backup.py
 
 # Test outputs
-tests/
 debug_*.py
 
 # Settings backups
