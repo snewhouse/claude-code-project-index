@@ -4,16 +4,125 @@ Shared utilities for project indexing.
 Contains common functionality used by both project_index.py and hook scripts.
 """
 
+import json
+import os
 import re
+import sys
+import hashlib
+import subprocess
+import tempfile
 import fnmatch
 from pathlib import Path
-from typing import Dict, List, Optional, Set, Tuple
+from typing import Any, Dict, List, Optional, Set, Tuple
+
+
+def validate_python_cmd(cmd_path: str) -> bool:
+    """Validate that a python command path is safe to execute.
+
+    Accepts: python, python3, python3.12, python3.13
+    Rejects: python3-malicious, python3.12.1-extra, relative paths
+    """
+    path = Path(cmd_path)
+
+    # Must be an absolute path
+    if not path.is_absolute():
+        return False
+
+    # Must exist and be executable
+    if not path.exists() or not os.access(str(path), os.X_OK):
+        return False
+
+    # Basename must match strict Python interpreter pattern
+    basename = path.name
+    if not re.fullmatch(r'python\d*(\.\d+)?', basename):
+        return False
+
+    return True
+
+
+def calculate_files_hash(project_root: Path) -> str:
+    """Calculate hash of non-ignored files to detect changes.
+
+    Uses git ls-files with fallback to manual file discovery.
+    Returns a 16-char hex digest or 'unknown' on error.
+    """
+    try:
+        result = subprocess.run(
+            ['git', 'ls-files', '--cached', '--others', '--exclude-standard'],
+            cwd=str(project_root),
+            capture_output=True,
+            text=True,
+            timeout=5
+        )
+
+        if result.returncode == 0:
+            files = result.stdout.strip().split('\n') if result.stdout.strip() else []
+        else:
+            # Fallback to manual file discovery
+            files = []
+            for file_path in project_root.rglob('*'):
+                if file_path.is_file() and not any(part.startswith('.') for part in file_path.parts):
+                    files.append(str(file_path.relative_to(project_root)))
+
+        hasher = hashlib.sha256()
+        for file_path in sorted(files):
+            full_path = project_root / file_path
+            if full_path.exists():
+                try:
+                    mtime = str(full_path.stat().st_mtime)
+                    hasher.update(f"{file_path}:{mtime}".encode())
+                except (OSError, ValueError):
+                    pass
+
+        return hasher.hexdigest()[:16]
+    except Exception as e:
+        print(f"Warning: Could not calculate files hash: {e}", file=sys.stderr)
+        return "unknown"
+
+
+def atomic_write_json(file_path: Path, data: dict, indent: int = None,
+                      use_fcntl: bool = False) -> None:
+    """Atomically write JSON data to a file using tempfile + os.replace.
+
+    Args:
+        file_path: Target file path.
+        data: Dictionary to serialize as JSON.
+        indent: JSON indent level (None for minified).
+        use_fcntl: Whether to use fcntl.flock for advisory locking.
+    """
+    separators = (',', ':') if indent is None else None
+    content = json.dumps(data, indent=indent, separators=separators).encode('utf-8')
+
+    tmp_fd, tmp_path = tempfile.mkstemp(
+        dir=str(file_path.parent),
+        suffix='.tmp',
+        prefix=f'.{file_path.stem}_'
+    )
+    try:
+        if use_fcntl:
+            try:
+                import fcntl
+                fcntl.flock(tmp_fd, fcntl.LOCK_EX)
+            except (ImportError, OSError):
+                pass
+        os.write(tmp_fd, content)
+        os.close(tmp_fd)
+        os.replace(tmp_path, str(file_path))
+    except Exception:
+        try:
+            os.close(tmp_fd)
+        except Exception:
+            pass
+        if os.path.exists(tmp_path):
+            os.unlink(tmp_path)
+        raise
+
 
 # What to ignore (sensible defaults)
 IGNORE_DIRS = {
     '.git', 'node_modules', '__pycache__', '.venv', 'venv', 'env',
     'build', 'dist', '.next', 'target', '.pytest_cache', 'coverage',
-    '.idea', '.vscode', '__pycache__', '.DS_Store', 'eggs', '.eggs',
+    '.idea', '.vscode', '.DS_Store', 'eggs', '.eggs',
     '.claude'  # Exclude Claude configuration directory
 }
 
@@ -513,7 +622,7 @@ def extract_python_signatures(content: str) -> Dict[str, Dict]:
     return result
 
 
-def extract_javascript_signatures(content: str) -> Dict[str, any]:
+def extract_javascript_signatures(content: str) -> Dict[str, Any]:
     """Extract JavaScript/TypeScript function and class signatures with full details."""
     result = {
         'imports': [],
@@ -895,7 +1004,7 @@ def extract_function_calls_shell(body: str, all_functions: Set[str]) -> List[str
     return sorted(list(calls))
 
 
-def _parse_shell_function(func_name: str, doc: Optional[str], lines: List[str], start_line_idx: int, all_function_names: Set[str]) -> any:
+def _parse_shell_function(func_name: str, doc: Optional[str], lines: List[str], start_line_idx: int, all_function_names: Set[str]) -> Any:
     """Parse a shell function body, extracting params, calls, and signature.
 
     Shared implementation for both 'name() {' and 'function name {' styles.
@@ -966,7 +1075,7 @@ def _parse_shell_function(func_name: str, doc: Optional[str], lines: List[str], 
     return func_info
 
 
-def extract_shell_signatures(content: str) -> Dict[str, any]:
+def extract_shell_signatures(content: str) -> Dict[str, Any]:
     """Extract shell script function signatures and structure."""
     result = {
         'functions': {},

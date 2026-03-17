@@ -29,7 +29,8 @@ from index_utils import (
     IGNORE_DIRS, PARSEABLE_LANGUAGES, CODE_EXTENSIONS, MARKDOWN_EXTENSIONS,
     DIRECTORY_PURPOSES, extract_python_signatures, extract_javascript_signatures,
     extract_shell_signatures, extract_markdown_structure, infer_file_purpose,
-    infer_directory_purpose, get_language_name, should_index_file, parse_file
+    infer_directory_purpose, get_language_name, should_index_file, parse_file,
+    atomic_write_json,
 )
 
 # Limits to keep it fast and simple
@@ -546,19 +547,10 @@ def compress_if_needed(dense_index: Dict, target_size: int = MAX_INDEX_SIZE) -> 
     
     print(f"⚠️  Index too large ({current_size} bytes), compressing to {target_size}...")
     
-    # Add safeguards
-    iteration = 0
-    MAX_ITERATIONS = 10
-    
     # Progressive compression strategies
-    
+
     # Step 1: Reduce tree to 10 items
-    iteration += 1
-    if iteration > MAX_ITERATIONS:
-        print(f"  ⚠️ Max compression iterations reached. Returning partially compressed index.")
-        return dense_index
-    
-    print(f"  Step {iteration}: Reducing tree structure...")
+    print(f"  Step 1: Reducing tree structure...")
     if len(dense_index.get(KEY_TREE, [])) > 10:
         dense_index[KEY_TREE] = dense_index[KEY_TREE][:10]
         dense_index[KEY_TREE].append("... (truncated)")
@@ -568,12 +560,7 @@ def compress_if_needed(dense_index: Dict, target_size: int = MAX_INDEX_SIZE) -> 
             return dense_index
         
     # Step 2: Truncate docstrings to 40 chars
-    iteration += 1
-    if iteration > MAX_ITERATIONS:
-        print(f"  ⚠️ Max compression iterations reached. Returning partially compressed index.")
-        return dense_index
-    
-    print(f"  Step {iteration}: Truncating docstrings...")
+    print(f"  Step 2: Truncating docstrings...")
     for path, file_data in dense_index.get(KEY_FILES, {}).items():
         if len(file_data) > 1 and isinstance(file_data[1], list):
             # Truncate function docstrings
@@ -591,12 +578,7 @@ def compress_if_needed(dense_index: Dict, target_size: int = MAX_INDEX_SIZE) -> 
         return dense_index
         
     # Step 3: Remove docstrings entirely
-    iteration += 1
-    if iteration > MAX_ITERATIONS:
-        print(f"  ⚠️ Max compression iterations reached. Returning partially compressed index.")
-        return dense_index
-    
-    print(f"  Step {iteration}: Removing docstrings entirely...")
+    print(f"  Step 3: Removing docstrings entirely...")
     for path, file_data in dense_index.get(KEY_FILES, {}).items():
         if len(file_data) > 1 and isinstance(file_data[1], list):
             # Remove docstrings from functions
@@ -614,12 +596,7 @@ def compress_if_needed(dense_index: Dict, target_size: int = MAX_INDEX_SIZE) -> 
         return dense_index
     
     # Step 4: Remove documentation map
-    iteration += 1
-    if iteration > MAX_ITERATIONS:
-        print(f"  ⚠️ Max compression iterations reached. Returning partially compressed index.")
-        return dense_index
-    
-    print(f"  Step {iteration}: Removing documentation map...")
+    print(f"  Step 4: Removing documentation map...")
     if KEY_DOCS in dense_index:
         del dense_index[KEY_DOCS]
     
@@ -629,12 +606,7 @@ def compress_if_needed(dense_index: Dict, target_size: int = MAX_INDEX_SIZE) -> 
         return dense_index
     
     # Step 5: Emergency truncation - keep most important files
-    iteration += 1
-    if iteration > MAX_ITERATIONS:
-        print(f"  ⚠️ Max compression iterations reached. Returning partially compressed index.")
-        return dense_index
-    
-    print(f"  Step {iteration}: Emergency truncation - keeping most important files...")
+    print(f"  Step 5: Emergency truncation - keeping most important files...")
     if dense_index.get(KEY_FILES):
         files_to_keep = int(len(dense_index[KEY_FILES]) * (target_size / current_size) * 0.9)
         if files_to_keep < 10:
@@ -748,24 +720,7 @@ def main():
     
     # Save to PROJECT_INDEX.json (minified) using atomic write
     output_path = Path('PROJECT_INDEX.json')
-    content = json.dumps(index, separators=(',', ':'))
-    tmp_fd, tmp_path = tempfile.mkstemp(
-        dir=str(output_path.parent),
-        suffix='.tmp',
-        prefix='.PROJECT_INDEX_'
-    )
-    try:
-        os.write(tmp_fd, content.encode('utf-8'))
-        os.close(tmp_fd)
-        os.replace(tmp_path, str(output_path))
-    except Exception:
-        try:
-            os.close(tmp_fd)
-        except Exception:
-            pass
-        if os.path.exists(tmp_path):
-            os.unlink(tmp_path)
-        raise
+    atomic_write_json(output_path, index)
     
     # Print summary
     print_summary(index, skipped_count)

@@ -15,6 +15,10 @@ import time
 from pathlib import Path
 from datetime import datetime
 
+# Add scripts/ to path for imports
+sys.path.insert(0, str(Path(__file__).parent))
+from index_utils import validate_python_cmd, calculate_files_hash, atomic_write_json
+
 try:
     import fcntl
     HAS_FCNTL = True
@@ -26,29 +30,6 @@ DEFAULT_SIZE_K = 50  # Default 50k tokens
 MIN_SIZE_K = 1       # Minimum 1k tokens
 CLAUDE_MAX_K = 100   # Max 100k for Claude (leaves room for reasoning)
 EXTERNAL_MAX_K = 800 # Max 800k for external AI
-
-
-def _validate_python_cmd(cmd_path: str) -> bool:
-    """Validate that a python command path is safe to execute."""
-    import os
-    from pathlib import Path
-
-    path = Path(cmd_path)
-
-    # Must be an absolute path
-    if not path.is_absolute():
-        return False
-
-    # Must exist and be executable
-    if not path.exists() or not os.access(str(path), os.X_OK):
-        return False
-
-    # Basename must look like a Python interpreter
-    basename = path.name
-    if not (basename.startswith('python') or basename == 'python3'):
-        return False
-
-    return True
 
 
 def find_project_root():
@@ -132,43 +113,6 @@ def parse_index_flag(prompt):
     
     return size_k, clipboard_mode, cleaned_prompt
 
-def calculate_files_hash(project_root):
-    """Calculate hash of non-ignored files to detect changes."""
-    try:
-        # Use git ls-files to get non-ignored files
-        result = subprocess.run(
-            ['git', 'ls-files', '--cached', '--others', '--exclude-standard'],
-            cwd=str(project_root),
-            capture_output=True,
-            text=True,
-            timeout=5
-        )
-        
-        if result.returncode == 0:
-            files = result.stdout.strip().split('\n') if result.stdout.strip() else []
-        else:
-            # Fallback to manual file discovery
-            files = []
-            for file_path in project_root.rglob('*'):
-                if file_path.is_file() and not any(part.startswith('.') for part in file_path.parts):
-                    files.append(str(file_path.relative_to(project_root)))
-        
-        # Hash file paths and modification times
-        hasher = hashlib.sha256()
-        for file_path in sorted(files):
-            full_path = project_root / file_path
-            if full_path.exists():
-                try:
-                    mtime = str(full_path.stat().st_mtime)
-                    hasher.update(f"{file_path}:{mtime}".encode())
-                except (OSError, ValueError):
-                    pass
-        
-        return hasher.hexdigest()[:16]
-    except Exception as e:
-        print(f"Warning: Could not calculate files hash: {e}", file=sys.stderr)
-        return "unknown"
-
 def should_regenerate_index(project_root, index_path, requested_size_k):
     """Determine if index needs regeneration."""
     if not index_path.exists():
@@ -220,7 +164,7 @@ def generate_index_at_size(project_root, target_size_k, is_clipboard_mode=False)
         python_cmd_file = Path.home() / '.claude-code-project-index' / '.python_cmd'
         if python_cmd_file.exists():
             python_cmd = python_cmd_file.read_text().strip()
-            if not _validate_python_cmd(python_cmd):
+            if not validate_python_cmd(python_cmd):
                 print(f"⚠️ Invalid Python command in .python_cmd: {python_cmd}", file=sys.stderr)
                 python_cmd = sys.executable  # Fallback to current interpreter
         else:
@@ -271,26 +215,7 @@ def generate_index_at_size(project_root, target_size_k, is_clipboard_mode=False)
                 index['_meta'].update(metadata_update)
                 
                 # Atomic write with optional locking
-                index_data = json.dumps(index, indent=2).encode('utf-8')
-                tmp_fd, tmp_path = tempfile.mkstemp(
-                    dir=str(index_path.parent),
-                    suffix='.tmp',
-                    prefix='.PROJECT_INDEX_'
-                )
-                try:
-                    if HAS_FCNTL:
-                        fcntl.flock(tmp_fd, fcntl.LOCK_EX)
-                    os.write(tmp_fd, index_data)
-                    os.close(tmp_fd)
-                    os.replace(tmp_path, str(index_path))
-                except Exception:
-                    try:
-                        os.close(tmp_fd)
-                    except Exception:
-                        pass
-                    if os.path.exists(tmp_path):
-                        os.unlink(tmp_path)
-                    raise
+                atomic_write_json(index_path, index, indent=2, use_fcntl=HAS_FCNTL)
                 
                 print(f"✅ Created PROJECT_INDEX.json ({actual_size_k}k actual, {target_size_k}k target)", file=sys.stderr)
                 return True
@@ -410,8 +335,8 @@ def _try_tmux_buffer(content):
 
 def _try_xclip(content):
     """Try xclip clipboard (local Linux with X11)."""
-    result = subprocess.run(['which', 'xclip'], capture_output=True)
-    if result.returncode != 0:
+    import shutil
+    if not shutil.which('xclip'):
         return None
     env = os.environ.copy()
     if not env.get('DISPLAY'):
@@ -498,15 +423,6 @@ def _build_hook_output(copy_result, cleaned_prompt, size_k):
         header = f"📋 Clipboard Mode Activated\n\nIndex and instructions copied to clipboard ({size_k}k tokens, {data} chars).\nPaste into external AI (Gemini, Claude.ai, ChatGPT) for analysis."
     elif transport_type == 'ssh_clipboard':
         header = f"📋 Clipboard Mode - Clipboard Success!\n\n✅ Index sent to clipboard via OSC 52 ({size_k}k tokens).\n📁 Also saved to: {data}\n\nPaste directly into external AI (Gemini, Claude.ai, ChatGPT) for analysis."
-    elif transport_type == 'ssh_file_large':
-        header = (
-            f"📋 Clipboard Mode - Content Too Large for Auto-Copy\n\n"
-            f"Index saved to: {data} ({size_k}k tokens).\n"
-            f"⚠️ Content exceeds mosh/OSC 52 limit for automatic clipboard.\n\n"
-            f"Copy the file manually: cat {data} | pbcopy  # macOS\n"
-            f"                         cat {data} | xclip   # Linux\n\n"
-            f"Then paste into external AI (Gemini, Claude.ai, ChatGPT) for analysis."
-        )
     elif transport_type == 'file':
         header = (
             f"📁 Clipboard Mode (File Fallback)\n\n"

@@ -9,28 +9,9 @@ import sys
 import subprocess
 from pathlib import Path
 
-
-def _validate_python_cmd(cmd_path: str) -> bool:
-    """Validate that a python command path is safe to execute."""
-    import os
-    from pathlib import Path as _Path
-
-    path = _Path(cmd_path)
-
-    # Must be an absolute path
-    if not path.is_absolute():
-        return False
-
-    # Must exist and be executable
-    if not path.exists() or not os.access(str(path), os.X_OK):
-        return False
-
-    # Basename must look like a Python interpreter
-    basename = path.name
-    if not (basename.startswith('python') or basename == 'python3'):
-        return False
-
-    return True
+# Add scripts/ to path for imports
+sys.path.insert(0, str(Path(__file__).parent))
+from index_utils import validate_python_cmd, calculate_files_hash
 
 
 def should_regenerate(project_root: Path, index_path: Path) -> bool:
@@ -39,26 +20,10 @@ def should_regenerate(project_root: Path, index_path: Path) -> bool:
         return True
 
     try:
-        import hashlib
+        current_hash = calculate_files_hash(project_root)
+        if current_hash == "unknown":
+            return True
 
-        # Quick hash of current file state
-        result = subprocess.run(
-            ['git', 'ls-files', '--cached', '--others', '--exclude-standard'],
-            cwd=str(project_root),
-            capture_output=True, text=True, timeout=5
-        )
-        if result.returncode != 0:
-            return True  # Can't determine, regenerate to be safe
-
-        files = sorted(result.stdout.strip().split('\n')) if result.stdout.strip() else []
-        hasher = hashlib.sha256()
-        for f in files:
-            fp = project_root / f
-            if fp.exists():
-                hasher.update(f"{f}:{fp.stat().st_mtime}".encode())
-        current_hash = hasher.hexdigest()[:16]
-
-        # Compare with stored hash
         with open(index_path, 'r') as fh:
             index = json.load(fh)
             stored_hash = index.get('_meta', {}).get('files_hash', '')
@@ -107,7 +72,7 @@ def main():
     python_cmd_file = Path.home() / '.claude-code-project-index' / '.python_cmd'
     if python_cmd_file.exists():
         python_cmd = python_cmd_file.read_text().strip()
-        if not _validate_python_cmd(python_cmd):
+        if not validate_python_cmd(python_cmd):
             print(f"Warning: Invalid Python command in .python_cmd: {python_cmd}", file=sys.stderr)
             python_cmd = sys.executable  # Fallback to current interpreter
     else:
