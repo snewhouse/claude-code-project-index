@@ -281,6 +281,30 @@ jq '
 
 echo "✓ Hooks configured in settings.json"
 
+# Register MCP server (if claude CLI available and fastmcp installed)
+echo ""
+echo "Registering MCP server..."
+if command -v claude &> /dev/null; then
+    # Check if already registered
+    if claude mcp list 2>/dev/null | grep -q "project-index"; then
+        echo "✓ MCP server already registered (skipping)"
+    else
+        if $PYTHON_CMD -c "import fastmcp" 2>/dev/null; then
+            claude mcp add --transport stdio --scope user project-index -- $PYTHON_CMD "$INSTALL_DIR/scripts/mcp_server.py" 2>/dev/null && \
+                echo "✓ MCP server registered at user scope" || \
+                echo "⚠️  MCP registration failed (non-critical — server can be added manually)"
+        else
+            echo "⚠️  FastMCP not installed — MCP server not registered"
+            echo "   Install with: pip install fastmcp"
+            echo "   Then register: claude mcp add --transport stdio --scope user project-index -- $PYTHON_CMD $INSTALL_DIR/scripts/mcp_server.py"
+        fi
+    fi
+else
+    echo "⚠️  Claude CLI not found — MCP server not registered"
+    echo "   After installing Claude Code, run:"
+    echo "   claude mcp add --transport stdio --scope user project-index -- $PYTHON_CMD $INSTALL_DIR/scripts/mcp_server.py"
+fi
+
 # Test installation
 echo ""
 echo "Testing installation..."

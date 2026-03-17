@@ -1,45 +1,61 @@
 # Project Index Workflow Integration — Tasks (HTP)
 
 ## Milestone 1: Foundation (MCP Fix + Registration + SessionStart Rule)
-- Status: PENDING
+- Status: ACTIVE
 - Dependencies: None
 - Complexity: 35%
 - Acceptance Criteria: MCP server doesn't crash without index; registered at user scope; SessionStart rule suggests /index; 135 tests pass
 
 ### Step 1.1: Fix mcp_server.py for graceful degradation
-- Status: PENDING
+- Status: COMPLETE
 - Files: `scripts/mcp_server.py`
 - Action: Replace eager `find_index()` at startup with lazy `_get_engine()` per-tool-call. Each tool returns helpful JSON error when no index.
 - Result Log:
+  ✅ COMPLETE 2026-03-17 14:45
+  **Output**: Rewrote mcp_server.py — `find_index()` now returns `None` instead of raising. Added `_get_engine()` lazy-loader with caching. All 6 tools check engine availability and return `NO_INDEX_MSG` JSON when unavailable.
+  **Artifacts**: `scripts/mcp_server.py` (rewritten)
 
 ### Step 1.2: Add MCP server instructions for Tool Search
-- Status: PENDING
+- Status: COMPLETE
 - Files: `scripts/mcp_server.py`
 - Action: Add descriptive server instructions to FastMCP constructor so Tool Search can discover tools by relevance.
 - Result Log:
+  ✅ COMPLETE 2026-03-17 14:45
+  **Output**: Added `SERVER_INSTRUCTIONS` string and passed as `instructions=SERVER_INSTRUCTIONS` to `FastMCP()` constructor. Describes all 6 tools and their use cases.
 
 ### Step 1.3: Write tests for graceful degradation
-- Status: PENDING
+- Status: COMPLETE
 - Files: `tests/test_mcp_server.py` (new)
 - Action: Test that create_mcp_server() works when no PROJECT_INDEX.json exists; test tool responses with and without index.
 - Result Log:
+  ✅ COMPLETE 2026-03-17 14:46
+  **Output**: Created 8 tests covering: find_index returns None/Path, _get_engine returns None/engine, engine caching, create_mcp_server succeeds without index, NO_INDEX_MSG validity, SERVER_INSTRUCTIONS presence. All 8 pass.
+  **Artifacts**: `tests/test_mcp_server.py` (new, 8 tests)
 
 ### Step 1.4: Run full test suite
-- Status: PENDING
+- Status: COMPLETE
 - Action: `python3 -m pytest tests/ -v` — all 135+ tests pass
 - Result Log:
+  ✅ COMPLETE 2026-03-17 14:47
+  **Output**: 143 tests passed in 1.00s (135 original + 8 new MCP server tests). Zero failures.
 
 ### Step 1.5: Update install.sh with MCP registration
-- Status: PENDING
+- Status: COMPLETE
 - Files: `install.sh`
 - Action: Add `claude mcp add --transport stdio --scope user project-index -- python3 ~/.claude-code-project-index/scripts/mcp_server.py` to installer. Include idempotency check (skip if already registered).
 - Result Log:
+  ✅ COMPLETE 2026-03-17 14:46
+  **Output**: Added MCP registration section to install.sh with 3-tier logic: (1) skip if already registered, (2) register if fastmcp installed, (3) print manual instructions otherwise. Checks for `claude` CLI availability.
+  **Artifacts**: `install.sh` (modified)
 
 ### Step 1.6: Create SessionStart rule
-- Status: PENDING
+- Status: COMPLETE
 - Files: `~/.claude/rules/project-index-awareness.md` (new)
 - Action: Auto-loaded rule that checks for PROJECT_INDEX.json; suggests /index if missing. Keep concise (<50 lines).
 - Result Log:
+  ✅ COMPLETE 2026-03-17 14:46
+  **Output**: Created 10-line rule file. Checks for PROJECT_INDEX.json presence, describes MCP tools when present, suggests `/index` when missing. Concise and non-intrusive.
+  **Artifacts**: `~/.claude/rules/project-index-awareness.md` (new)
 
 ### Step 1.7: Commit and push M1
 - Status: PENDING
