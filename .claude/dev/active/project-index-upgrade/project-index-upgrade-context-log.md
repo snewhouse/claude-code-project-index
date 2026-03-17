@@ -55,6 +55,12 @@ Seven research reports were analyzed from the `codebase-deep-dive-20260317-09493
 - Tests: 54 pass (46 original + 8 new)
 - Notable: The tightened basename regex `python\d*(\.\d+)?` is stricter than the original `startswith('python')` check, properly rejecting paths like `python3-malicious`
 
+## 2026-03-17 Milestone 8 Completion: Multi-Language Augmentation + Polish (FINAL)
+- Status: COMPLETE
+- Key outcome: Added optional ast-grep integration for Go/Rust/Java/Ruby parsing and PageRank-based symbol importance scoring. Both features degrade gracefully when unavailable. All 8 milestones now complete.
+- Artifacts: Created scripts/pagerank.py, tests/test_pagerank.py (7 tests), tests/test_ast_grep.py (6 tests). Modified scripts/index_utils.py (sg integration), scripts/project_index.py (PageRank integration).
+- Tests: 135 pass (122 from M7 + 13 new)
+
 ## 2026-03-17 Milestone 7 Completion: Query Engine + MCP Server
 - Status: COMPLETE
 - Key outcome: Created QueryEngine with 6 structural query methods, CLI with argparse, and optional MCP server (FastMCP guard). All tools work against both verbose and dense index formats.

@@ -493,6 +493,19 @@ def build_index(root_dir: str, incremental: bool = False) -> Tuple[Dict, int]:
     if xg_edges:
         index['xg'] = xg_edges
 
+    # Compute symbol importance (PageRank)
+    from pagerank import compute_pagerank
+    all_edges = _build_dense_call_graph_edges(index)
+    if index.get('xg'):
+        all_edges.extend(index['xg'])
+    importance = compute_pagerank(all_edges)
+    if importance:
+        if '_meta' not in index:
+            index['_meta'] = {}
+        # Store top 50 most important symbols
+        top_symbols = sorted(importance.items(), key=lambda x: x[1], reverse=True)[:50]
+        index['_meta']['symbol_importance'] = {k: round(v, 4) for k, v in top_symbols}
+
     # Add staleness check
     week_old = datetime.now().timestamp() - 7 * 24 * 60 * 60
     index['staleness_check'] = week_old
@@ -614,6 +627,12 @@ def convert_to_enhanced_dense_format(index: Dict) -> Dict:
         dense[KEY_DIR_PURPOSES] = index['directory_purposes']
     if 'staleness_check' in index:
         dense[KEY_STALENESS] = index['staleness_check']
+
+    # Preserve symbol importance from PageRank
+    if '_meta' in index and 'symbol_importance' in index.get('_meta', {}):
+        if '_meta' not in dense:
+            dense['_meta'] = {}
+        dense['_meta']['symbol_importance'] = index['_meta']['symbol_importance']
 
     return dense
 

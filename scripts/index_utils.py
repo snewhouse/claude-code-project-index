@@ -1653,6 +1653,111 @@ def resolve_cross_file_edges(index: Dict, import_map: Dict[str, str]) -> List[Li
 PARSER_REGISTRY: Dict[str, any] = {}
 
 
+def extract_signatures_via_sg(content: str, lang: str) -> Optional[Dict]:
+    """Extract function/class signatures using ast-grep (sg) if available.
+
+    Uses sg (ast-grep) to parse Go, Rust, Java, Ruby source code.
+    Returns None if sg is not installed or parsing fails.
+    Silent no-op when sg is unavailable.
+
+    Args:
+        content: Source code string
+        lang: Language identifier (go, rust, java, ruby)
+    """
+    import shutil
+
+    sg_path = shutil.which('sg')
+    if not sg_path:
+        return None
+
+    # Map language to sg language name and function patterns
+    lang_configs = {
+        'go': {
+            'ext': '.go',
+            'func_pattern': 'func $NAME($$$PARAMS) $$$RET { $$$BODY }',
+            'method_pattern': 'func ($RECV $TYPE) $NAME($$$PARAMS) $$$RET { $$$BODY }',
+        },
+        'rust': {
+            'ext': '.rs',
+            'func_pattern': 'fn $NAME($$$PARAMS) $$$RET { $$$BODY }',
+        },
+        'java': {
+            'ext': '.java',
+            'func_pattern': '$MOD $RET $NAME($$$PARAMS) { $$$BODY }',
+            'class_pattern': '$MOD class $NAME $$$REST { $$$BODY }',
+        },
+        'ruby': {
+            'ext': '.rb',
+            'func_pattern': 'def $NAME($$$PARAMS) $$$BODY end',
+        },
+    }
+
+    config = lang_configs.get(lang)
+    if not config:
+        return None
+
+    result = {'functions': {}, 'classes': {}}
+    tmp_path = None
+
+    try:
+        # Write content to a temp file with correct extension
+        with tempfile.NamedTemporaryFile(mode='w', suffix=config['ext'], delete=False) as tmp:
+            tmp.write(content)
+            tmp_path = tmp.name
+
+        # Use sg to find function definitions
+        try:
+            proc = subprocess.run(
+                ['sg', '--pattern', config['func_pattern'], '--json', tmp_path],
+                capture_output=True, text=True, timeout=10
+            )
+            if proc.returncode == 0 and proc.stdout.strip():
+                matches = json.loads(proc.stdout)
+                for match in matches:
+                    if isinstance(match, dict):
+                        meta = match.get('metaVariables', {})
+                        name = meta.get('single', {}).get('NAME', {}).get('text', '')
+                        if name:
+                            line = match.get('range', {}).get('start', {}).get('line', 0)
+                            result['functions'][name] = {
+                                'line': line + 1,  # 1-based
+                                'signature': f"({meta.get('multi', {}).get('PARAMS', '')})",
+                            }
+        except (subprocess.TimeoutExpired, json.JSONDecodeError, KeyError):
+            pass
+
+        # Try method/class patterns if available
+        if 'method_pattern' in config:
+            try:
+                proc = subprocess.run(
+                    ['sg', '--pattern', config['method_pattern'], '--json', tmp_path],
+                    capture_output=True, text=True, timeout=10
+                )
+                if proc.returncode == 0 and proc.stdout.strip():
+                    matches = json.loads(proc.stdout)
+                    for match in matches:
+                        if isinstance(match, dict):
+                            meta = match.get('metaVariables', {})
+                            name = meta.get('single', {}).get('NAME', {}).get('text', '')
+                            if name:
+                                line = match.get('range', {}).get('start', {}).get('line', 0)
+                                result['functions'][name] = {
+                                    'line': line + 1,
+                                    'signature': f"({meta.get('multi', {}).get('PARAMS', '')})",
+                                }
+            except (subprocess.TimeoutExpired, json.JSONDecodeError, KeyError):
+                pass
+
+    finally:
+        if tmp_path:
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
+
+    return result if result['functions'] or result['classes'] else None
+
+
 def register_parsers() -> None:
     """Register all parser functions. Called at module load time."""
     global PARSER_REGISTRY
@@ -1665,6 +1770,17 @@ def register_parsers() -> None:
         '.sh': extract_shell_signatures,
         '.bash': extract_shell_signatures,
     }
+    # Register ast-grep parsers for additional languages (silent no-op if sg not installed)
+    import shutil
+    if shutil.which('sg'):
+        sg_langs = {
+            '.go': 'go',
+            '.rs': 'rust',
+            '.java': 'java',
+            '.rb': 'ruby',
+        }
+        for ext, lang in sg_langs.items():
+            PARSER_REGISTRY[ext] = lambda content, _lang=lang: extract_signatures_via_sg(content, _lang)
 
 
 def parse_file(content: str, extension: str) -> Optional[Dict]:

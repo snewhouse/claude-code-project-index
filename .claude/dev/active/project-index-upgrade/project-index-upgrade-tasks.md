@@ -265,7 +265,7 @@ _Hierarchical Task Planning roadmap with dependencies and state tracking._
 ---
 
 ## Milestone 8: Multi-Language Augmentation + Polish
-- **Status:** PENDING
+- **Status:** COMPLETE
 - **Dependencies:** Milestone 4, Milestone 7
 - **Complexity:** 45%
 - **Effort:** 3-4 hours
@@ -274,15 +274,16 @@ _Hierarchical Task Planning roadmap with dependencies and state tracking._
   - Silent no-op if `sg` not installed
   - PageRank-based importance scores in `_meta` for compression decisions
   - Tests for ast-grep integration (mocked subprocess)
+- **Result Log:** All 4 acceptance criteria verified. 135 tests pass (122 from M7 + 13 new). ast-grep integration with conditional PARSER_REGISTRY registration. PageRank via power iteration with convergence detection. Symbol importance stored in _meta.
 
 ### Step 8.1: ast-grep integration
-- **Status:** PENDING
+- **Status:** COMPLETE
 - **Dependencies:** Milestone 4
-- **Files:** `scripts/index_utils.py`, `tests/test_ast_grep.py` (create)
-- **Result Log:**
+- **Files:** `scripts/index_utils.py`, `tests/test_ast_grep.py` (created)
+- **Result Log:** extract_signatures_via_sg function with sg subprocess calls. Conditional registration in register_parsers for .go/.rs/.java/.rb. 6 mocked tests. sg v0.41.0 available on this system — verified real parsing of Go functions.
 
 ### Step 8.2: PageRank symbol importance
-- **Status:** PENDING
+- **Status:** COMPLETE
 - **Dependencies:** Milestone 7
-- **Files:** `scripts/pagerank.py` (create), `scripts/project_index.py`, `tests/test_pagerank.py` (create)
-- **Result Log:**
+- **Files:** `scripts/pagerank.py` (created), `scripts/project_index.py`, `tests/test_pagerank.py` (created)
+- **Result Log:** compute_pagerank with power iteration, damping=0.85, convergence tolerance. Integrated into build_index (top 50 symbols stored in _meta.symbol_importance). 7 tests covering empty, chain, hub, cycle, normalization, single edge, convergence.
