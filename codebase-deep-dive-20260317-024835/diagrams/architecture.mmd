@@ -1,0 +1,33 @@
+graph TD
+    subgraph "Claude Code Runtime"
+        A[User Prompt] -->|fires| B[UserPromptSubmit Hook]
+        Z[Session End] -->|fires| Y[Stop Hook]
+    end
+
+    subgraph "Hook Layer"
+        B --> C[i_flag_hook.py]
+        Y --> X[stop_hook.py]
+        C -->|parse flag| D{"-i or -ic?"}
+        D -->|no flag| E[exit 0 - no action]
+        D -->|"-i"| F[Subagent Mode]
+        D -->|"-ic"| G[Clipboard Mode]
+    end
+
+    subgraph "Index Generation Pipeline"
+        F -->|subprocess| H[project_index.py]
+        G -->|subprocess| H
+        X -->|subprocess| H
+        H -->|imports| I[index_utils.py]
+        H -->|build_index| J[File Discovery]
+        J -->|parse| K[Signature Extraction]
+        K -->|resolve| L[Call Graph]
+        L -->|convert| M[Dense Format]
+        M -->|compress| N[Size Reduction]
+        N -->|write| O[(PROJECT_INDEX.json)]
+    end
+
+    subgraph "Consumption"
+        F -->|hookSpecificOutput| P[index-analyzer agent]
+        G -->|clipboard chain| Q[External AI Tool]
+        P -->|Read/Grep/Glob| O
+    end
