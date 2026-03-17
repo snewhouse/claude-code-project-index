@@ -1170,6 +1170,36 @@ def get_language_name(extension: str) -> str:
     return extension[1:] if extension else 'unknown'
 
 
+# Parser registry: maps file extensions to parser functions
+# Populated after parser function definitions via register_parsers()
+PARSER_REGISTRY: Dict[str, any] = {}
+
+
+def register_parsers() -> None:
+    """Register all parser functions. Called at module load time."""
+    global PARSER_REGISTRY
+    PARSER_REGISTRY = {
+        '.py': extract_python_signatures,
+        '.js': extract_javascript_signatures,
+        '.jsx': extract_javascript_signatures,
+        '.ts': extract_javascript_signatures,
+        '.tsx': extract_javascript_signatures,
+        '.sh': extract_shell_signatures,
+        '.bash': extract_shell_signatures,
+    }
+
+
+def parse_file(content: str, extension: str) -> Optional[Dict]:
+    """Parse a file using the registered parser for its extension.
+
+    Returns parsed result dict or None if no parser registered.
+    """
+    parser = PARSER_REGISTRY.get(extension)
+    if parser is None:
+        return None
+    return parser(content)
+
+
 # Global cache for gitignore patterns
 _gitignore_cache = {}
 
@@ -1310,3 +1340,7 @@ def get_git_files(root_path: Path) -> Optional[List[Path]]:
     except (subprocess.TimeoutExpired, FileNotFoundError, Exception):
         # Git not available or command failed
         return None
+
+
+# Populate the parser registry at module load time (after all parsers are defined)
+register_parsers()

@@ -33,6 +33,41 @@ def _validate_python_cmd(cmd_path: str) -> bool:
     return True
 
 
+def should_regenerate(project_root: Path, index_path: Path) -> bool:
+    """Check if the index needs regeneration based on file hash staleness."""
+    if not index_path.exists():
+        return True
+
+    try:
+        import hashlib
+
+        # Quick hash of current file state
+        result = subprocess.run(
+            ['git', 'ls-files', '--cached', '--others', '--exclude-standard'],
+            cwd=str(project_root),
+            capture_output=True, text=True, timeout=5
+        )
+        if result.returncode != 0:
+            return True  # Can't determine, regenerate to be safe
+
+        files = sorted(result.stdout.strip().split('\n')) if result.stdout.strip() else []
+        hasher = hashlib.sha256()
+        for f in files:
+            fp = project_root / f
+            if fp.exists():
+                hasher.update(f"{f}:{fp.stat().st_mtime}".encode())
+        current_hash = hasher.hexdigest()[:16]
+
+        # Compare with stored hash
+        with open(index_path, 'r') as fh:
+            index = json.load(fh)
+            stored_hash = index.get('_meta', {}).get('files_hash', '')
+
+        return current_hash != stored_hash
+    except Exception:
+        return True  # On any error, regenerate to be safe
+
+
 def main():
     """Stop hook - regenerate index if PROJECT_INDEX.json exists."""
     # Find PROJECT_INDEX.json by searching up the directory tree
@@ -49,7 +84,13 @@ def main():
     # If no PROJECT_INDEX.json found, nothing to do
     if not project_root:
         return
-    
+
+    # Check if regeneration is actually needed
+    index_path = project_root / 'PROJECT_INDEX.json'
+    if not should_regenerate(project_root, index_path):
+        print("PROJECT_INDEX.json is up to date, skipping refresh", file=sys.stderr)
+        return
+
     # Find the project_index.py script
     # First check if we're in the project itself
     local_script = project_root / 'scripts' / 'project_index.py'
