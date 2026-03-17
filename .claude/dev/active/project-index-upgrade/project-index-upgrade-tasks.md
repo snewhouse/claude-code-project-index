@@ -196,7 +196,7 @@ _Hierarchical Task Planning roadmap with dependencies and state tracking._
 ---
 
 ## Milestone 6: Incremental Indexing
-- **Status:** PENDING
+- **Status:** COMPLETE
 - **Dependencies:** Milestone 1
 - **Complexity:** 65%
 - **Effort:** 4-5 hours
@@ -207,26 +207,27 @@ _Hierarchical Task Planning roadmap with dependencies and state tracking._
   - Cache versioning: full invalidation on tool version change
   - `--incremental` flag on project_index.py
   - Fallback to full rebuild when >50% dirty or cache corrupt
-  - `PRAGMA integrity_check` on cache open
+  - `PRAGMA quick_check` on cache open (not full integrity_check per verification report)
   - Tests with SQLite fixtures
+- **Result Log:** All 8 acceptance criteria verified. 112 tests pass (102 from M5 + 10 new). cache_db.py created with SQLite backend, two-tier dirty detection, git diff support, version invalidation, and corrupt-db recovery. Integrated into project_index.py via --incremental flag. Second incremental run shows 28/29 cache hits.
 
 ### Step 6.1: SQLite cache backend
-- **Status:** PENDING
+- **Status:** COMPLETE
 - **Dependencies:** Milestone 1
-- **Files:** `scripts/cache_db.py` (create), `tests/test_cache_db.py` (create)
-- **Result Log:**
+- **Files:** `scripts/cache_db.py` (created), `tests/test_cache_db.py` (created)
+- **Result Log:** Created cache_db.py with open_cache, compute_content_hash, get_cached_result, update_cache, purge_removed_files. WAL mode with quick_check. 10 tests covering all operations.
 
 ### Step 6.2: Dirty file detection
-- **Status:** PENDING
+- **Status:** COMPLETE
 - **Dependencies:** Step 6.1
 - **Files:** `scripts/cache_db.py`, `tests/test_cache_db.py`
-- **Result Log:**
+- **Result Log:** is_file_dirty implements two-tier check (mtime+size fast, SHA-256 accurate). find_dirty_files with 50% threshold. get_git_changed_files for committed changes.
 
 ### Step 6.3: Incremental update integration
-- **Status:** PENDING
+- **Status:** COMPLETE
 - **Dependencies:** Step 6.2
 - **Files:** `scripts/project_index.py`
-- **Result Log:**
+- **Result Log:** build_index accepts incremental=False. _parse_all_files accepts optional cache_conn. --incremental CLI flag. Cache purged of removed files after processing.
 
 ---
 

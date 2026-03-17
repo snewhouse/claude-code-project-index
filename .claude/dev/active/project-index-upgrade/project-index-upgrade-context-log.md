@@ -55,6 +55,12 @@ Seven research reports were analyzed from the `codebase-deep-dive-20260317-09493
 - Tests: 54 pass (46 original + 8 new)
 - Notable: The tightened basename regex `python\d*(\.\d+)?` is stricter than the original `startswith('python')` check, properly rejecting paths like `python3-malicious`
 
+## 2026-03-17 Milestone 6 Completion: Incremental Indexing
+- Status: COMPLETE
+- Key outcome: Created SQLite-backed cache (cache_db.py) with two-tier dirty detection, version invalidation, and corrupt-db recovery. Integrated into project_index.py via --incremental flag. Second run shows 28/29 cache hits.
+- Artifacts: Created scripts/cache_db.py, tests/test_cache_db.py (10 tests). Modified scripts/project_index.py (incremental parameter + cache integration).
+- Tests: 112 pass (102 from M5 + 10 new)
+
 ## 2026-03-17 Milestone 5 Completion: Cross-File Resolution
 - Status: COMPLETE
 - Key outcome: Implemented build_import_map and resolve_cross_file_edges for cross-file call graph edges. Schema extended with backward-compatible xg key. Projects using standard package imports get cross-file edges; projects using sys.path manipulation (like this one) correctly get no edges.

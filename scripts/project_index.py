@@ -19,6 +19,7 @@ __version__ = "0.2.0-beta"
 import json
 import os
 import re
+import sys
 import tempfile
 from datetime import datetime
 from pathlib import Path
@@ -169,15 +170,24 @@ def _discover_files(root: Path) -> Tuple[List[Path], int, Dict]:
 
 
 def _parse_all_files(
-    files_to_process: List[Path], root: Path, index: Dict, directory_files: Dict
+    files_to_process: List[Path], root: Path, index: Dict, directory_files: Dict,
+    cache_conn=None
 ) -> Tuple[int, int]:
     """Parse all discovered files and populate the index.
+
+    Args:
+        files_to_process: List of file paths to process.
+        root: Project root path.
+        index: Index dict to populate.
+        directory_files: Dict mapping directory paths to file lists.
+        cache_conn: Optional SQLite connection for incremental caching.
 
     Returns:
         Tuple of (file_count, skipped_count).
     """
     file_count = 0
     skipped_count = 0
+    cache_hits = 0
 
     for file_path in files_to_process:
         if file_count >= MAX_FILES:
@@ -220,21 +230,44 @@ def _parse_all_files(
 
         # Try to parse if we support this language
         if file_path.suffix in PARSEABLE_LANGUAGES:
-            try:
-                content = file_path.read_text(encoding='utf-8', errors='ignore')
-                extracted = parse_file(content, file_path.suffix) or {'functions': {}, 'classes': {}}
+            # Check cache first when incremental mode is active
+            cached_result = None
+            if cache_conn is not None:
+                from cache_db import is_file_dirty, get_cached_result, update_cache
+                rel_path_str = str(rel_path)
+                if not is_file_dirty(cache_conn, rel_path_str, file_path):
+                    cached_result = get_cached_result(cache_conn, rel_path_str)
 
-                if extracted['functions'] or extracted.get('classes', {}):
-                    file_info.update(extracted)
+            if cached_result is not None:
+                # Use cached parse result
+                if cached_result.get('functions') or cached_result.get('classes', {}):
+                    file_info.update(cached_result)
                     file_info['parsed'] = True
+                cache_hits += 1
 
                 lang_key = PARSEABLE_LANGUAGES[file_path.suffix]
                 index['stats']['fully_parsed'][lang_key] = \
                     index['stats']['fully_parsed'].get(lang_key, 0) + 1
+            else:
+                try:
+                    content = file_path.read_text(encoding='utf-8', errors='ignore')
+                    extracted = parse_file(content, file_path.suffix) or {'functions': {}, 'classes': {}}
 
-            except Exception:
-                index['stats']['listed_only'][language] = \
-                    index['stats']['listed_only'].get(language, 0) + 1
+                    if extracted['functions'] or extracted.get('classes', {}):
+                        file_info.update(extracted)
+                        file_info['parsed'] = True
+
+                    lang_key = PARSEABLE_LANGUAGES[file_path.suffix]
+                    index['stats']['fully_parsed'][lang_key] = \
+                        index['stats']['fully_parsed'].get(lang_key, 0) + 1
+
+                    # Update cache if incremental mode is active
+                    if cache_conn is not None:
+                        update_cache(cache_conn, str(rel_path), file_path, extracted, language)
+
+                except Exception:
+                    index['stats']['listed_only'][language] = \
+                        index['stats']['listed_only'].get(language, 0) + 1
         else:
             index['stats']['listed_only'][language] = \
                 index['stats']['listed_only'].get(language, 0) + 1
@@ -244,6 +277,9 @@ def _parse_all_files(
 
         if file_count % 100 == 0:
             print(f"  Indexed {file_count} files...")
+
+    if cache_conn is not None and cache_hits > 0:
+        print(f"   Cache: {cache_hits} files from cache, {file_count - cache_hits} parsed fresh")
 
     return file_count, skipped_count
 
@@ -362,8 +398,13 @@ def _build_call_graph(index: Dict) -> None:
                                     }
 
 
-def build_index(root_dir: str) -> Tuple[Dict, int]:
-    """Build the enhanced index with architectural awareness."""
+def build_index(root_dir: str, incremental: bool = False) -> Tuple[Dict, int]:
+    """Build the enhanced index with architectural awareness.
+
+    Args:
+        root_dir: Root directory to index.
+        incremental: If True, use SQLite cache for incremental updates.
+    """
     root = Path(root_dir)
     index = {
         'indexed_at': datetime.now().isoformat(),
@@ -390,10 +431,36 @@ def build_index(root_dir: str) -> Tuple[Dict, int]:
     print("📊 Building directory tree...")
     index['project_structure']['tree'] = generate_tree_structure(root)
 
+    # Open cache if incremental mode
+    cache_conn = None
+    if incremental:
+        try:
+            from cache_db import open_cache, purge_removed_files
+            cache_conn = open_cache()
+            print("   Incremental mode: using SQLite cache")
+        except Exception as e:
+            print(f"   Warning: Could not open cache ({e}), falling back to full rebuild")
+            cache_conn = None
+
     # Discover and parse files
     print("🔍 Indexing files...")
     files_to_process, dir_count, directory_files = _discover_files(root)
-    file_count, skipped_count = _parse_all_files(files_to_process, root, index, directory_files)
+    file_count, skipped_count = _parse_all_files(
+        files_to_process, root, index, directory_files, cache_conn=cache_conn
+    )
+
+    # Purge removed files and commit cache
+    if cache_conn is not None:
+        try:
+            from cache_db import purge_removed_files
+            current_rel_paths = set(str(f.relative_to(root)) for f in files_to_process)
+            purged = purge_removed_files(cache_conn, current_rel_paths)
+            if purged > 0:
+                print(f"   Cache: purged {purged} removed file(s)")
+            cache_conn.commit()
+            cache_conn.close()
+        except Exception as e:
+            print(f"   Warning: Cache cleanup failed ({e})")
 
     # Infer directory purposes
     print("🏗️  Analyzing directory purposes...")
@@ -714,10 +781,15 @@ def main():
     else:
         target_size_bytes = MAX_INDEX_SIZE
     
+    # Check for incremental mode
+    incremental = '--incremental' in sys.argv
+    if incremental:
+        print("   Incremental mode: enabled")
+
     print("   Analyzing project structure and documentation...")
-    
+
     # Build index for current directory
-    index, skipped_count = build_index('.')
+    index, skipped_count = build_index('.', incremental=incremental)
     
     # Convert to enhanced dense format (always)
     index = convert_to_enhanced_dense_format(index)
