@@ -23,5 +23,12 @@
 - MCP config verified: `claude mcp add --transport stdio --scope user` puts servers in `~/.claude.json`
 - Current MCP server crashes with FileNotFoundError when no index — must fix before global registration
 
+## 2026-03-17 Milestone 1 Completion: Foundation
+- Status: COMPLETE
+- Key outcome: MCP server now gracefully degrades without index; install.sh registers MCP at user scope; SessionStart rule created
+- Artifacts: `scripts/mcp_server.py` (rewritten), `tests/test_mcp_server.py` (new, 8 tests), `install.sh` (MCP registration added), `~/.claude/rules/project-index-awareness.md` (new)
+- Tests: 143 passing (135 original + 8 new)
+- Decisions: Used `Path | None` return type in mcp_server.py (acceptable since fastmcp requires Python 3.10+). Kept SessionStart rule concise at 10 lines to avoid noise.
+
 **Critical Correction:**
 Initial assumption was MCP servers go in `settings.json`. User challenged this. Web research of https://code.claude.com/docs/en/mcp confirmed: MCP servers stored in `~/.claude.json` (user/local scope) or `.mcp.json` (project scope). `settings.json` only controls permissions/allowlists.

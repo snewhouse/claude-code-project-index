@@ -1,7 +1,7 @@
 # Project Index Workflow Integration — Tasks (HTP)
 
 ## Milestone 1: Foundation (MCP Fix + Registration + SessionStart Rule)
-- Status: ACTIVE
+- Status: COMPLETE
 - Dependencies: None
 - Complexity: 35%
 - Acceptance Criteria: MCP server doesn't crash without index; registered at user scope; SessionStart rule suggests /index; 135 tests pass
@@ -58,46 +58,59 @@
   **Artifacts**: `~/.claude/rules/project-index-awareness.md` (new)
 
 ### Step 1.7: Commit and push M1
-- Status: PENDING
+- Status: COMPLETE
 - Action: `git add` changed files, commit with conventional message, push
 - Result Log:
+  ✅ COMPLETE 2026-03-17 14:48
+  **Output**: Commit 8fcf408 — 4 files changed, 204 insertions, 16 deletions. Pushed to origin/main.
 
 ---
 
 ## Milestone 2: Hub Skill (code-intelligence-index)
-- Status: PENDING
+- Status: ACTIVE
 - Dependencies: Milestone 1
 - Complexity: 50%
 - Acceptance Criteria: Skill exists, is invocable, documents freshness checks, query patterns, fallback matrix, and integration patterns
 
 ### Step 2.1: Create skill directory and SKILL.md
-- Status: PENDING
+- Status: COMPLETE
 - Files: `~/.claude/skills/code-intelligence-index/SKILL.md` (new)
 - Action: Write the hub skill with sections: When to Use, Freshness Check Protocol, Query Method Guide, Fallback Matrix, Integration Patterns for Consuming Skills
 - Result Log:
+  ✅ COMPLETE 2026-03-17 14:52
+  **Output**: Created skill with 5 sections: When to Use, Freshness Check Protocol, Query Method Guide, Fallback Matrix, Integration Patterns. ~120 lines, well under 300-line budget.
+  **Artifacts**: `~/.claude/skills/code-intelligence-index/SKILL.md` (new)
 
 ### Step 2.2: Write freshness check protocol section
-- Status: PENDING
+- Status: COMPLETE
 - Files: Same as 2.1
 - Action: Document how to check `_meta.files_hash` vs current `calculate_files_hash()`, age check (<24h), and when to suggest regeneration
 - Result Log:
+  ✅ COMPLETE 2026-03-17 14:52
+  **Output**: Documented 3-tier freshness check: existence → age (<24h TTL) → hash comparison. Includes quick check pattern for consuming skills.
 
 ### Step 2.3: Write query method guide section
-- Status: PENDING
+- Status: COMPLETE
 - Files: Same as 2.1
 - Action: Map each workflow question to the right QueryEngine method with examples. Include MCP tool names and CLI equivalents.
 - Result Log:
+  ✅ COMPLETE 2026-03-17 14:52
+  **Output**: Created MCP tools table (6 tools with examples) and CLI equivalents section. Also documented direct JSON access keys for lightweight queries.
 
 ### Step 2.4: Write fallback matrix section
-- Status: PENDING
+- Status: COMPLETE
 - Files: Same as 2.1
 - Action: Document: index exists + fresh → use QueryEngine; index exists + stale → use but warn; no index → fall back to Grep/sg with suggestion to run /index
 - Result Log:
+  ✅ COMPLETE 2026-03-17 14:52
+  **Output**: Created 5-row fallback matrix covering: fresh, stale, hash mismatch, no index + tool available, no index + no tool. Key rule: "Never block on missing index."
 
 ### Step 2.5: Test skill invocation
-- Status: PENDING
+- Status: COMPLETE
 - Action: Verify `Skill(code-intelligence-index)` loads correctly in a new session
 - Result Log:
+  ✅ COMPLETE 2026-03-17 14:53
+  **Output**: Verified skill appears in available skills list as `code-intelligence-index` with correct description. Skill is discoverable by the system.
 
 ### Step 2.6: Commit and push M2
 - Status: PENDING
