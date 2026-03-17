@@ -115,9 +115,9 @@ Rejects: `python3-malicious`, `python3.12.1-extra`
 
 ### Test Baseline
 
-- Current test count: 93 tests (after M4)
-- Current test files: 18
-- Target after all milestones: ~140 tests (93 + ~47 new)
+- Current test count: 102 tests (after M5)
+- Current test files: 19
+- Target after all milestones: ~140 tests (102 + ~38 new)
 
 ### Research Document Paths
 

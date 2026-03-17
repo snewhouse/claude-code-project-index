@@ -55,6 +55,12 @@ Seven research reports were analyzed from the `codebase-deep-dive-20260317-09493
 - Tests: 54 pass (46 original + 8 new)
 - Notable: The tightened basename regex `python\d*(\.\d+)?` is stricter than the original `startswith('python')` check, properly rejecting paths like `python3-malicious`
 
+## 2026-03-17 Milestone 5 Completion: Cross-File Resolution
+- Status: COMPLETE
+- Key outcome: Implemented build_import_map and resolve_cross_file_edges for cross-file call graph edges. Schema extended with backward-compatible xg key. Projects using standard package imports get cross-file edges; projects using sys.path manipulation (like this one) correctly get no edges.
+- Artifacts: Modified scripts/index_utils.py (2 functions), scripts/project_index.py (2 integration points). Created tests/test_cross_file.py (9 tests).
+- Tests: 102 pass (93 from M4 + 9 new)
+
 ## 2026-03-17 Milestone 4 Completion: Python AST Parser
 - Status: COMPLETE
 - Key outcome: Implemented extract_python_signatures_ast using Python's ast module for 100% accurate parsing. Feature flag V2_AST_PARSER controls selection, SyntaxError falls back to regex parser. Output format compatible with dense format conversion.

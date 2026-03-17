@@ -1520,6 +1520,134 @@ def get_language_name(extension: str) -> str:
     return extension[1:] if extension else 'unknown'
 
 
+def build_import_map(project_root: Path) -> Dict[str, str]:
+    """Build a map from Python dotted module names to relative file paths.
+
+    Scans the project for .py files and maps:
+    - 'pkg.module' -> 'pkg/module.py'
+    - 'pkg' -> 'pkg/__init__.py' (if exists)
+
+    Only handles static, deterministic mappings. Does NOT handle:
+    - Dynamic imports (importlib)
+    - Runtime sys.path manipulation
+    - Namespace packages without __init__.py
+
+    Args:
+        project_root: Absolute path to project root.
+
+    Returns:
+        Dict mapping dotted module names to relative file paths.
+    """
+    import_map: Dict[str, str] = {}
+    project_root = Path(project_root)
+
+    # Try git ls-files first, fall back to rglob
+    git_files = get_git_files(project_root)
+    if git_files is not None:
+        py_files = [f for f in git_files if f.suffix == '.py']
+    else:
+        py_files = list(project_root.rglob('*.py'))
+
+    for py_file in py_files:
+        try:
+            rel = py_file.relative_to(project_root)
+        except ValueError:
+            continue
+
+        rel_str = str(rel).replace(os.sep, '/')
+
+        # Convert path to dotted module name: src/utils/helpers.py -> src.utils.helpers
+        dotted = rel_str.replace('/', '.').removesuffix('.py')
+
+        import_map[dotted] = rel_str
+
+        # For __init__.py, also map the package name (without .__init__)
+        if rel.name == '__init__.py':
+            pkg_dotted = dotted.removesuffix('.__init__')
+            if pkg_dotted:
+                import_map[pkg_dotted] = rel_str
+
+    return import_map
+
+
+def resolve_cross_file_edges(index: Dict, import_map: Dict[str, str]) -> List[List[str]]:
+    """Resolve cross-file call edges using the import map.
+
+    For each file in the index, checks its imports against the import map.
+    When an import resolves to another indexed file, creates cross-file edges
+    by matching function calls against the target file's exported functions.
+
+    Args:
+        index: The full project index dict (with 'files' key).
+        import_map: Output of build_import_map().
+
+    Returns:
+        List of [source, target, relation_type] triples.
+        Example: [["src/a.py:func_x", "src/b.py:func_y", "call"]]
+    """
+    edges: List[List[str]] = []
+    files = index.get('files', {})
+
+    # Pre-build a map of target_file -> set of function names for fast lookup
+    file_functions: Dict[str, Set[str]] = {}
+    for fpath, finfo in files.items():
+        if not isinstance(finfo, dict):
+            continue
+        func_names: Set[str] = set()
+        for fname in finfo.get('functions', {}):
+            func_names.add(fname)
+        for cname, cdata in finfo.get('classes', {}).items():
+            if isinstance(cdata, dict):
+                for mname in cdata.get('methods', {}):
+                    func_names.add(mname)
+        if func_names:
+            file_functions[fpath] = func_names
+
+    for source_path, source_info in files.items():
+        if not isinstance(source_info, dict):
+            continue
+
+        source_imports = source_info.get('imports', [])
+        if not source_imports:
+            continue
+
+        # Resolve each import to a target file
+        resolved_targets: Set[str] = set()
+        for imp in source_imports:
+            # Try direct match in import_map
+            target = import_map.get(imp)
+            if target and target in files and target != source_path:
+                resolved_targets.add(target)
+
+        if not resolved_targets:
+            continue
+
+        # Collect all calls from this file's functions and methods
+        caller_calls: List[Tuple[str, List[str]]] = []
+
+        for fname, fdata in source_info.get('functions', {}).items():
+            if isinstance(fdata, dict) and fdata.get('calls'):
+                caller_calls.append((f"{source_path}:{fname}", fdata['calls']))
+
+        for cname, cdata in source_info.get('classes', {}).items():
+            if isinstance(cdata, dict):
+                for mname, mdata in cdata.get('methods', {}).items():
+                    if isinstance(mdata, dict) and mdata.get('calls'):
+                        caller_calls.append(
+                            (f"{source_path}:{cname}.{mname}", mdata['calls'])
+                        )
+
+        # Match calls against target file functions
+        for caller_id, calls in caller_calls:
+            for target_path in resolved_targets:
+                target_funcs = file_functions.get(target_path, set())
+                for call_name in calls:
+                    if call_name in target_funcs:
+                        edges.append([caller_id, f"{target_path}:{call_name}", "call"])
+
+    return edges
+
+
 # Parser registry: maps file extensions to parser functions
 # Populated after parser function definitions via register_parsers()
 PARSER_REGISTRY: Dict[str, any] = {}

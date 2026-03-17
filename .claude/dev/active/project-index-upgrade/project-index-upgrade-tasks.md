@@ -168,7 +168,7 @@ _Hierarchical Task Planning roadmap with dependencies and state tracking._
 ---
 
 ## Milestone 5: Cross-File Resolution
-- **Status:** PENDING
+- **Status:** COMPLETE
 - **Dependencies:** Milestone 4
 - **Complexity:** 60%
 - **Effort:** 3-4 hours
@@ -179,18 +179,19 @@ _Hierarchical Task Planning roadmap with dependencies and state tracking._
   - Does NOT guess: dynamic imports, runtime sys.path manipulation
   - Schema extension is backward-compatible (additive `xg` key)
   - Tests with multi-file fixtures
+- **Result Log:** All 6 acceptance criteria verified. 102 tests pass (93 from M4 + 9 new). build_import_map walks .py files to create dotted-name→path mapping. resolve_cross_file_edges matches function calls against imported files' functions. Integrated into build_index and dense format.
 
 ### Step 5.1: Implement `build_import_map`
-- **Status:** PENDING
+- **Status:** COMPLETE
 - **Dependencies:** Milestone 4
-- **Files:** `scripts/index_utils.py`, `tests/test_cross_file.py` (create)
-- **Result Log:**
+- **Files:** `scripts/index_utils.py`, `tests/test_cross_file.py` (created)
+- **Result Log:** build_import_map uses get_git_files or rglob to find .py files, converts paths to dotted module names, handles __init__.py package mappings. 4 tests for import map (simple, nested, empty, git-based).
 
 ### Step 5.2: Implement `resolve_cross_file_edges`
-- **Status:** PENDING
+- **Status:** COMPLETE
 - **Dependencies:** Step 5.1
 - **Files:** `scripts/project_index.py`, `scripts/index_utils.py`
-- **Result Log:**
+- **Result Log:** resolve_cross_file_edges matches function calls against resolved import targets. Returns [source:func, target:func, "call"] triples. Integrated into build_index (after _build_call_graph) and convert_to_enhanced_dense_format (passes through xg key). 5 tests for edge resolution.
 
 ---
 

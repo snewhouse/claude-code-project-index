@@ -418,6 +418,14 @@ def build_index(root_dir: str) -> Tuple[Dict, int]:
     print("📞 Building call graph...")
     _build_call_graph(index)
 
+    # Build cross-file resolution
+    print("🔗 Resolving cross-file edges...")
+    from index_utils import build_import_map, resolve_cross_file_edges
+    import_map = build_import_map(root)
+    xg_edges = resolve_cross_file_edges(index, import_map)
+    if xg_edges:
+        index['xg'] = xg_edges
+
     # Add staleness check
     week_old = datetime.now().timestamp() - 7 * 24 * 60 * 60
     index['staleness_check'] = week_old
@@ -530,6 +538,10 @@ def convert_to_enhanced_dense_format(index: Dict) -> Dict:
         sections = doc_info.get('sections', [])
         if sections:
             dense[KEY_DOCS][doc_path] = sections[:10]
+
+    # Pass through cross-file edges if present
+    if 'xg' in index:
+        dense['xg'] = index['xg']
 
     if 'directory_purposes' in index:
         dense[KEY_DIR_PURPOSES] = index['directory_purposes']
