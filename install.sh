@@ -50,10 +50,11 @@ if [[ -n "$SCRIPT_DIR" && -f "$SCRIPT_DIR/scripts/find_python.sh" ]]; then
     PYTHON_CMD=$(bash "$SCRIPT_DIR/scripts/find_python.sh")
 else
     # Fallback to simple check if find_python.sh doesn't exist yet
+    # Use command -v to resolve absolute path — validate_python_cmd requires it
     if command -v python3 &> /dev/null; then
-        PYTHON_CMD="python3"
+        PYTHON_CMD="$(command -v python3)"
     elif command -v python &> /dev/null; then
-        PYTHON_CMD="python"
+        PYTHON_CMD="$(command -v python)"
     else
         echo "❌ Error: Python 3.8+ is required but not found"
         echo "Please install Python 3.8+ and try again"
